@@ -2,9 +2,14 @@ package dk.nst.hrvmonitor.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.hardware.camera2.CaptureRequest
 import android.util.Size as AndroidSize
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -65,6 +70,7 @@ import dk.nst.hrvmonitor.ui.components.HrvMetricsRow
 import dk.nst.hrvmonitor.ui.components.QualityBar
 import dk.nst.hrvmonitor.ui.components.ReportSheet
 import dk.nst.hrvmonitor.ui.components.SignalChart
+import dk.nst.hrvmonitor.ui.theme.Accent
 import dk.nst.hrvmonitor.ui.theme.OnSurfaceMuted
 import dk.nst.hrvmonitor.ui.theme.Pulse
 import dk.nst.hrvmonitor.ui.theme.SurfaceDark
@@ -136,22 +142,27 @@ private fun ContentLayout(
             .padding(padding)
             .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Header(state.elapsedSec, state.isMeasuring, onOpenCalibrate)
+        Header(state.phase, onOpenCalibrate)
         Spacer(Modifier.height(8.dp))
 
         CameraSection(
-            isMeasuring = state.isMeasuring,
+            phase = state.phase,
+            roi = state.roi,
+            gridCols = state.gridCols,
+            gridRows = state.gridRows,
             analyzer = viewModel.analyzer
         )
         Spacer(Modifier.height(8.dp))
 
         BpmHero(
             bpm = state.metrics.bpm,
-            isMeasuring = state.isMeasuring,
+            phase = state.phase,
             elapsedSec = state.elapsedSec,
             goodSec = state.goodSec,
             targetGoodSec = state.targetGoodSec,
-            progress = state.progress,
+            targetSearchSec = state.targetSearchSec,
+            searchProgress = state.searchProgress,
+            measureProgress = state.measureProgress,
             isGoodSignal = state.isGoodSignal
         )
         Spacer(Modifier.height(8.dp))
@@ -175,7 +186,9 @@ private fun ContentLayout(
 }
 
 @Composable
-private fun Header(elapsed: Float, isMeasuring: Boolean, onOpenCalibrate: () -> Unit) {
+private fun Header(phase: MeasurementViewModel.Phase, onOpenCalibrate: () -> Unit) {
+    val active = phase == MeasurementViewModel.Phase.Searching ||
+        phase == MeasurementViewModel.Phase.Measuring
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(
@@ -184,13 +197,19 @@ private fun Header(elapsed: Float, isMeasuring: Boolean, onOpenCalibrate: () -> 
                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
             )
             Text(
-                if (isMeasuring) "Measuring · hold steady"
-                else "Tap Start, then cover the rear lens with a fingertip",
+                when (phase) {
+                    MeasurementViewModel.Phase.Searching ->
+                        "Finding the pulse region — hold finger steady"
+                    MeasurementViewModel.Phase.Measuring ->
+                        "Measuring HRV in the highlighted region"
+                    else ->
+                        "Tap Start: 10 s search + 50 s of clean recording"
+                },
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.labelSmall
             )
         }
-        if (!isMeasuring) {
+        if (!active) {
             IconButton(onClick = onOpenCalibrate) {
                 Icon(Icons.Filled.Tune, contentDescription = "Calibrate", tint = Color.White)
             }
@@ -227,7 +246,7 @@ private fun BottomActionBar(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                if (isMeasuring) "Stop" else "Start measurement (50 s good signal)",
+                if (isMeasuring) "Stop" else "Start measurement",
                 style = MaterialTheme.typography.titleMedium
             )
         }
@@ -264,13 +283,20 @@ private fun PermissionRequest(onRequest: () -> Unit, modifier: Modifier = Modifi
 }
 
 /**
- * Live camera preview + lifecycle. Camera is only bound (and torch only on) while
- * [isMeasuring] is true. While measuring, draws a centered ROI guide aligned with
- * PpgAnalyzer's analysis window.
+ * Live camera preview + lifecycle.
+ *  - Camera + torch are bound while [phase] is Searching or Measuring.
+ *  - AE/AWB are unlocked during Searching (let exposure converge), locked during
+ *    Measuring (so the camera stops fighting the pulse modulation).
+ *  - Phase 1: faint full-frame grid overlay so user sees the analysis window.
+ *  - Phase 2: the chosen ROI bounding box drawn over the preview.
  */
+@OptIn(ExperimentalCamera2Interop::class)
 @Composable
 private fun CameraSection(
-    isMeasuring: Boolean,
+    phase: MeasurementViewModel.Phase,
+    roi: MeasurementViewModel.RoiInfo?,
+    gridCols: Int,
+    gridRows: Int,
     analyzer: ImageAnalysis.Analyzer,
     modifier: Modifier = Modifier
 ) {
@@ -284,11 +310,15 @@ private fun CameraSection(
         }
     }
     val analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
+    val cameraRef = remember { mutableStateOf<Camera?>(null) }
+
+    val active = phase == MeasurementViewModel.Phase.Searching ||
+        phase == MeasurementViewModel.Phase.Measuring
 
     Box(
         modifier
             .fillMaxWidth()
-            .height(95.dp)
+            .height(110.dp)
             .clip(RoundedCornerShape(18.dp))
             .background(SurfaceDark)
     ) {
@@ -296,54 +326,76 @@ private fun CameraSection(
             factory = { previewView },
             modifier = Modifier.fillMaxSize()
         )
-        if (isMeasuring) {
-            Canvas(Modifier.fillMaxSize()) {
-                val side = minOf(size.width, size.height) * 0.55f
-                val topLeft = Offset((size.width - side) / 2, (size.height - side) / 2)
-                drawRect(
-                    color = Color.White.copy(alpha = 0.55f),
-                    topLeft = topLeft,
-                    size = Size(side, side),
-                    style = Stroke(width = 2.5f)
-                )
-                val tick = side * 0.18f
-                val cx = size.width / 2; val cy = size.height / 2
-                drawLine(Color.White.copy(alpha = 0.55f),
-                    Offset(cx - tick, cy), Offset(cx + tick, cy), strokeWidth = 2.5f)
-                drawLine(Color.White.copy(alpha = 0.55f),
-                    Offset(cx, cy - tick), Offset(cx, cy + tick), strokeWidth = 2.5f)
+        when (phase) {
+            MeasurementViewModel.Phase.Searching -> {
+                Canvas(Modifier.fillMaxSize()) {
+                    val gc = Color.White.copy(alpha = 0.18f)
+                    for (i in 1 until gridCols) {
+                        val x = size.width * i / gridCols
+                        drawLine(gc, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
+                    }
+                    for (i in 1 until gridRows) {
+                        val y = size.height * i / gridRows
+                        drawLine(gc, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
+                    }
+                }
             }
-        } else {
-            Row(
-                Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Fingerprint,
-                    contentDescription = null,
-                    tint = OnSurfaceMuted,
-                    modifier = Modifier.size(28.dp)
-                )
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text("Camera off", color = Color.White, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Tap Start to enable preview, torch & measurement",
-                        color = OnSurfaceMuted,
-                        style = MaterialTheme.typography.labelSmall
+            MeasurementViewModel.Phase.Measuring -> {
+                if (roi != null) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        val w = size.width
+                        val h = size.height
+                        val left = w * roi.colStart / gridCols
+                        val right = w * (roi.colEnd + 1) / gridCols
+                        val top = h * roi.rowStart / gridRows
+                        val bottom = h * (roi.rowEnd + 1) / gridRows
+                        drawRect(
+                            color = Pulse.copy(alpha = 0.85f),
+                            topLeft = Offset(left, top),
+                            size = Size(right - left, bottom - top),
+                            style = Stroke(width = 3f)
+                        )
+                        drawRect(
+                            color = Pulse.copy(alpha = 0.18f),
+                            topLeft = Offset(left, top),
+                            size = Size(right - left, bottom - top)
+                        )
+                    }
+                }
+            }
+            else -> {
+                Row(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Fingerprint,
+                        contentDescription = null,
+                        tint = OnSurfaceMuted,
+                        modifier = Modifier.size(28.dp)
                     )
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text("Camera off", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Tap Start — first 10 s find the optimal pulse region, then 50 s of measurement",
+                            color = OnSurfaceMuted,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
                 }
             }
         }
     }
 
-    LaunchedEffect(isMeasuring) {
+    // Bind / unbind camera and apply AE/AWB lock based on phase.
+    LaunchedEffect(active) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = try { providerFuture.get() } catch (_: Exception) { return@addListener }
-            if (isMeasuring) {
+            if (active) {
                 val resolution = ResolutionSelector.Builder()
                     .setResolutionStrategy(
                         ResolutionStrategy(
@@ -357,27 +409,36 @@ private fun CameraSection(
                     .setResolutionSelector(resolution)
                     .build()
                     .also { it.setAnalyzer(analysisExecutor, analyzer) }
-
-                val preview = Preview.Builder()
-                    .build()
-                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
-
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
                 try {
                     provider.unbindAll()
-                    val camera = provider.bindToLifecycle(
+                    val cam = provider.bindToLifecycle(
                         lifecycleOwner,
                         CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        analysis
+                        preview, analysis
                     )
-                    camera.cameraControl.enableTorch(true)
-                } catch (_: Exception) {
-                    // Surface via QualityBar — ignore here.
-                }
+                    cam.cameraControl.enableTorch(true)
+                    cameraRef.value = cam
+                } catch (_: Exception) {}
             } else {
+                cameraRef.value = null
                 try { provider.unbindAll() } catch (_: Exception) {}
             }
         }, ContextCompat.getMainExecutor(context))
+    }
+
+    LaunchedEffect(phase, cameraRef.value) {
+        val cam = cameraRef.value ?: return@LaunchedEffect
+        val locked = phase == MeasurementViewModel.Phase.Measuring
+        try {
+            val c2 = Camera2CameraControl.from(cam.cameraControl)
+            c2.captureRequestOptions = CaptureRequestOptions.Builder()
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, locked)
+                .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, locked)
+                .build()
+        } catch (_: Throwable) {}
     }
 
     DisposableEffect(Unit) {

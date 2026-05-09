@@ -92,6 +92,23 @@ class SessionRecorder(private val appContext: Context) {
      * Closes the CSV writer and writes summary.json with metrics and full RR/peak series.
      * Safe to call when no session is active (no-op).
      */
+    /** Optional ROI metadata added to summary.json. */
+    data class RoiInfo(
+        val rowStart: Int,
+        val rowEnd: Int,
+        val colStart: Int,
+        val colEnd: Int,
+        val tileIndices: IntArray,
+        val gridCols: Int,
+        val gridRows: Int,
+        val bestScore: Float,
+        val medianFreqHz: Float,
+        val acceptable: Boolean
+    ) {
+        override fun equals(other: Any?): Boolean = this === other
+        override fun hashCode(): Int = System.identityHashCode(this)
+    }
+
     fun stop(
         durationSec: Float,
         sampleRateHz: Float,
@@ -99,7 +116,11 @@ class SessionRecorder(private val appContext: Context) {
         signal: List<SignalProcessor.Sample>,
         peaks: List<SignalProcessor.Peak>,
         rrMs: List<Float>,
-        metrics: HrvCalculator.Metrics
+        metrics: HrvCalculator.Metrics,
+        roi: RoiInfo? = null,
+        goodSec: Float = 0f,
+        targetGoodSec: Float = 0f,
+        timedOut: Boolean = false
     ): Session? {
         val session = current ?: return null
         finishWriterIfActive()
@@ -109,7 +130,8 @@ class SessionRecorder(private val appContext: Context) {
                 BufferedWriter(FileWriter(session.summaryJson)).use { w ->
                     w.write(buildSummaryJson(
                         session, durationSec, sampleRateHz, coverage,
-                        peaks, rrMs, metrics, samplesWritten
+                        peaks, rrMs, metrics, samplesWritten,
+                        roi, goodSec, targetGoodSec, timedOut
                     ))
                 }
                 Log.i(TAG, "Summary written to ${session.summaryJson.absolutePath}")
@@ -134,16 +156,37 @@ class SessionRecorder(private val appContext: Context) {
         peaks: List<SignalProcessor.Peak>,
         rrMs: List<Float>,
         metrics: HrvCalculator.Metrics,
-        nSamples: Long
+        nSamples: Long,
+        roi: RoiInfo?,
+        goodSec: Float,
+        targetGoodSec: Float,
+        timedOut: Boolean
     ): String = buildString {
         append("{\n")
         append("  \"session_id\": \"${s.dir.name}\",\n")
         append("  \"started_at\": ${s.startedAt},\n")
         append("  \"duration_sec\": ${"%.3f".format(Locale.US, durationSec)},\n")
+        append("  \"good_sec\": ${"%.3f".format(Locale.US, goodSec)},\n")
+        append("  \"target_good_sec\": ${"%.3f".format(Locale.US, targetGoodSec)},\n")
+        append("  \"timed_out\": $timedOut,\n")
         append("  \"sample_rate_hz\": ${"%.3f".format(Locale.US, fs)},\n")
         append("  \"n_samples\": $nSamples,\n")
         append("  \"coverage\": ${"%.4f".format(Locale.US, coverage)},\n")
         append("  \"device\": \"${Build.MANUFACTURER} ${Build.MODEL} / API ${Build.VERSION.SDK_INT}\",\n")
+        if (roi != null) {
+            append("  \"roi\": {\n")
+            append("    \"grid_cols\": ${roi.gridCols},\n")
+            append("    \"grid_rows\": ${roi.gridRows},\n")
+            append("    \"row_start\": ${roi.rowStart},\n")
+            append("    \"row_end\": ${roi.rowEnd},\n")
+            append("    \"col_start\": ${roi.colStart},\n")
+            append("    \"col_end\": ${roi.colEnd},\n")
+            append("    \"tile_indices\": [${roi.tileIndices.joinToString(",")}],\n")
+            append("    \"best_score\": ${"%.4f".format(Locale.US, roi.bestScore)},\n")
+            append("    \"median_freq_hz\": ${"%.3f".format(Locale.US, roi.medianFreqHz)},\n")
+            append("    \"acceptable\": ${roi.acceptable}\n")
+            append("  },\n")
+        }
         append("  \"metrics\": {\n")
         append("    \"bpm\": ${num(metrics.bpm)},\n")
         append("    \"rmssd_ms\": ${num(metrics.rmssdMs)},\n")

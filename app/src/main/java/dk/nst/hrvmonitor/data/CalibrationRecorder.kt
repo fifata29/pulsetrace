@@ -3,7 +3,7 @@ package dk.nst.hrvmonitor.data
 import android.content.Context
 import android.os.Build
 import android.util.Log
-import dk.nst.hrvmonitor.ppg.CalibrationAnalyzer
+import dk.nst.hrvmonitor.ppg.TileGridAnalyzer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,7 +20,7 @@ import java.util.Locale
 import java.util.TimeZone
 
 /**
- * Streams [CalibrationAnalyzer.TileSample]s to a CSV with one row per frame and one column
+ * Streams [TileGridAnalyzer.TileSample]s to a CSV with one row per frame and one column
  * per grid tile. The header includes device + camera config so the file is self-describing.
  *
  * Output: <externalFilesDir>/calibrations/<timestamp>/calibration-tiles.csv
@@ -29,7 +29,7 @@ class CalibrationRecorder(private val appContext: Context) {
 
     data class Session(val dir: File, val csv: File, val startedAt: Long)
 
-    private val flow = MutableSharedFlow<CalibrationAnalyzer.TileSample>(
+    private val flow = MutableSharedFlow<TileGridAnalyzer.TileSample>(
         extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
@@ -104,7 +104,7 @@ class CalibrationRecorder(private val appContext: Context) {
         return session
     }
 
-    fun appendSample(sample: CalibrationAnalyzer.TileSample) {
+    fun appendSample(sample: TileGridAnalyzer.TileSample) {
         if (current == null) return
         flow.tryEmit(sample)
     }

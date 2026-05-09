@@ -4,7 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dk.nst.hrvmonitor.data.CalibrationRecorder
-import dk.nst.hrvmonitor.ppg.CalibrationAnalyzer
+import dk.nst.hrvmonitor.ppg.TileGridAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -40,8 +40,8 @@ class CalibrationViewModel(application: Application) : AndroidViewModel(applicat
     @Volatile private var lastSampleNs: Long = 0L
     @Volatile private var latestCenterLuma: Float = 0f
 
-    val analyzer = CalibrationAnalyzer(GRID_COLS, GRID_ROWS) { sample ->
-        if (!_state.value.isRecording) return@CalibrationAnalyzer
+    val analyzer = TileGridAnalyzer(GRID_COLS, GRID_ROWS) { sample ->
+        if (!_state.value.isRecording) return@TileGridAnalyzer
         recorder.appendSample(sample)
         sampleCount++
         if (firstSampleNs == 0L) firstSampleNs = sample.timestampNs

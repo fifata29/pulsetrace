@@ -37,16 +37,19 @@ import dk.nst.hrvmonitor.ui.theme.Pulse
 import dk.nst.hrvmonitor.ui.theme.PulseSoft
 import dk.nst.hrvmonitor.ui.theme.SurfaceElev
 import dk.nst.hrvmonitor.ui.theme.Warn
+import dk.nst.hrvmonitor.viewmodel.MeasurementViewModel
 import kotlin.math.roundToInt
 
 @Composable
 fun BpmHero(
     bpm: Float?,
-    isMeasuring: Boolean,
+    phase: MeasurementViewModel.Phase,
     elapsedSec: Float,
     goodSec: Float,
     targetGoodSec: Float,
-    progress: Float,
+    targetSearchSec: Float,
+    searchProgress: Float,
+    measureProgress: Float,
     isGoodSignal: Boolean,
     modifier: Modifier = Modifier
 ) {
@@ -55,7 +58,15 @@ fun BpmHero(
         animationSpec = tween(durationMillis = 400),
         label = "bpm"
     )
-    val barColor = if (isGoodSignal || !isMeasuring) Pulse else Warn
+    val isSearching = phase == MeasurementViewModel.Phase.Searching
+    val isMeasuring = phase == MeasurementViewModel.Phase.Measuring
+    val isActive = isSearching || isMeasuring
+    val progress = if (isSearching) searchProgress else measureProgress
+    val barColor = when {
+        isSearching -> Accent
+        isMeasuring && !isGoodSignal -> Warn
+        else -> Pulse
+    }
     Column(
         modifier
             .fillMaxWidth()
@@ -73,7 +84,8 @@ fun BpmHero(
                     .clip(CircleShape)
                     .background(
                         when {
-                            !isMeasuring -> OnSurfaceMuted
+                            !isActive -> OnSurfaceMuted
+                            isSearching -> Accent
                             isGoodSignal -> Pulse
                             else -> Warn
                         }
@@ -82,16 +94,22 @@ fun BpmHero(
             Spacer(Modifier.width(8.dp))
             Text(
                 when {
-                    !isMeasuring -> "Idle"
+                    !isActive -> "Idle"
+                    isSearching -> "Searching pulse region"
                     isGoodSignal -> "Live"
                     else -> "Paused"
                 },
-                color = if (isMeasuring && !isGoodSignal) Warn else OnSurfaceMuted,
+                color = when {
+                    isSearching -> Accent
+                    isMeasuring && !isGoodSignal -> Warn
+                    else -> OnSurfaceMuted
+                },
                 style = MaterialTheme.typography.labelLarge
             )
             Spacer(Modifier.weight(1f))
             Text(
-                "${formatTime(goodSec)} / ${formatTime(targetGoodSec)} good",
+                if (isSearching) "${formatTime(elapsedSec)} / ${formatTime(targetSearchSec)}"
+                else "${formatTime(goodSec)} / ${formatTime(targetGoodSec)} good",
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.labelLarge
             )
@@ -132,7 +150,14 @@ fun BpmHero(
             color = barColor,
             trackColor = Color.White.copy(alpha = 0.10f)
         )
-        if (isMeasuring && !isGoodSignal) {
+        if (isSearching) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Analysing the frame to find the strongest pulse region…",
+                color = Accent,
+                style = MaterialTheme.typography.labelSmall
+            )
+        } else if (isMeasuring && !isGoodSignal) {
             Spacer(Modifier.height(4.dp))
             Text(
                 "Paused — press finger more firmly over lens & flash",
