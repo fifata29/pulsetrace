@@ -345,21 +345,26 @@ private fun CameraSection(
                     Canvas(Modifier.fillMaxSize()) {
                         val w = size.width
                         val h = size.height
-                        val left = w * roi.colStart / gridCols
-                        val right = w * (roi.colEnd + 1) / gridCols
-                        val top = h * roi.rowStart / gridRows
-                        val bottom = h * (roi.rowEnd + 1) / gridRows
-                        drawRect(
-                            color = Pulse.copy(alpha = 0.85f),
-                            topLeft = Offset(left, top),
-                            size = Size(right - left, bottom - top),
-                            style = Stroke(width = 3f)
-                        )
-                        drawRect(
-                            color = Pulse.copy(alpha = 0.18f),
-                            topLeft = Offset(left, top),
-                            size = Size(right - left, bottom - top)
-                        )
+                        val cellW = w / gridCols
+                        val cellH = h / gridRows
+                        // Draw each chosen tile as a highlighted cell — irregular shapes welcome.
+                        for (idx in roi.tileIndices) {
+                            val r = idx / gridCols
+                            val c = idx % gridCols
+                            val x = c * cellW
+                            val y = r * cellH
+                            drawRect(
+                                color = Pulse.copy(alpha = 0.30f),
+                                topLeft = Offset(x, y),
+                                size = Size(cellW, cellH)
+                            )
+                            drawRect(
+                                color = Pulse.copy(alpha = 0.95f),
+                                topLeft = Offset(x, y),
+                                size = Size(cellW, cellH),
+                                style = Stroke(width = 2f)
+                            )
+                        }
                     }
                 }
             }

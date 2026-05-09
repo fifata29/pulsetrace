@@ -4,7 +4,6 @@ import android.graphics.ImageFormat
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
-import java.nio.ByteBuffer
 
 /**
  * Frame analyzer that splits the frame into a [gridCols] × [gridRows] grid and emits both
@@ -36,6 +35,11 @@ class TileGridAnalyzer(
         override fun hashCode(): Int = System.identityHashCode(this)
     }
 
+    // Reusable byte buffers — direct ByteBuffer.get(idx) is a JNI call per byte;
+    // bulk-copying the plane into a Java byte[] once per frame is ~10× faster.
+    private var yScratch: ByteArray = ByteArray(0)
+    private var vScratch: ByteArray = ByteArray(0)
+
     override fun analyze(image: ImageProxy) {
         try {
             if (image.format != ImageFormat.YUV_420_888 || image.planes.size < 3) return
@@ -50,6 +54,16 @@ class TileGridAnalyzer(
 
             val yPlane = image.planes[0]
             val vPlane = image.planes[2]
+            val yBuf = yPlane.buffer
+            val vBuf = vPlane.buffer
+
+            val yLen = yBuf.remaining()
+            val vLen = vBuf.remaining()
+            if (yScratch.size < yLen) yScratch = ByteArray(yLen)
+            if (vScratch.size < vLen) vScratch = ByteArray(vLen)
+            yBuf.position(0); yBuf.get(yScratch, 0, yLen)
+            vBuf.position(0); vBuf.get(vScratch, 0, vLen)
+
             val outR = FloatArray(gridCols * gridRows)
             val outY = FloatArray(gridCols * gridRows)
             val yPixels = (tw * th).toFloat()
@@ -59,8 +73,8 @@ class TileGridAnalyzer(
                 for (col in 0 until gridCols) {
                     val x = col * tileW
                     val y = row * tileH
-                    val ySum = sumPlane(yPlane.buffer, yPlane.rowStride, yPlane.pixelStride, x, y, tw, th)
-                    val vSum = sumPlane(vPlane.buffer, vPlane.rowStride, vPlane.pixelStride, x / 2, y / 2, tw / 2, th / 2)
+                    val ySum = sumArray(yScratch, yLen, yPlane.rowStride, yPlane.pixelStride, x, y, tw, th)
+                    val vSum = sumArray(vScratch, vLen, vPlane.rowStride, vPlane.pixelStride, x / 2, y / 2, tw / 2, th / 2)
                     val meanY = if (yPixels > 0f) ySum / yPixels else 0f
                     val meanV = vSum / vPixels
                     val red = (meanY + 1.402f * (meanV - 128f)).coerceIn(0f, 255f)
@@ -88,21 +102,28 @@ class TileGridAnalyzer(
         }
     }
 
-    private fun sumPlane(
-        buf: ByteBuffer,
-        rowStride: Int,
-        pixelStride: Int,
+    private fun sumArray(
+        arr: ByteArray, len: Int,
+        rowStride: Int, pixelStride: Int,
         x: Int, y: Int, w: Int, h: Int
     ): Float {
         if (w <= 0 || h <= 0 || rowStride <= 0 || pixelStride <= 0) return 0f
-        val limit = buf.limit()
         var sum = 0L
-        for (row in 0 until h) {
-            val base = (y + row) * rowStride + x * pixelStride
-            for (col in 0 until w) {
-                val idx = base + col * pixelStride
-                if (idx < 0 || idx >= limit) continue
-                sum += buf.get(idx).toInt() and 0xFF
+        if (pixelStride == 1) {
+            for (row in 0 until h) {
+                val base = (y + row) * rowStride + x
+                val end = base + w
+                if (base < 0 || end > len) continue
+                for (i in base until end) sum += arr[i].toInt() and 0xFF
+            }
+        } else {
+            for (row in 0 until h) {
+                val base = (y + row) * rowStride + x * pixelStride
+                for (col in 0 until w) {
+                    val idx = base + col * pixelStride
+                    if (idx < 0 || idx >= len) continue
+                    sum += arr[idx].toInt() and 0xFF
+                }
             }
         }
         return sum.toFloat()

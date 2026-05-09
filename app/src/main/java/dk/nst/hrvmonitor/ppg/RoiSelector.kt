@@ -21,14 +21,15 @@ import kotlin.math.sqrt
 object RoiSelector {
 
     data class Result(
-        val tileIndices: IntArray,         // indices into row-major grid (size = topK at most)
+        val tileIndices: IntArray,         // the actual top-K chosen tiles (used for averaging)
         val bboxRowStart: Int,
-        val bboxRowEnd: Int,                // inclusive
+        val bboxRowEnd: Int,                // inclusive — diagnostic only
         val bboxColStart: Int,
-        val bboxColEnd: Int,                // inclusive
+        val bboxColEnd: Int,                // inclusive — diagnostic only
         val bestScore: Float,
         val medianFreqHz: Float,
         val sampleRateHz: Float,
+        val baselineLuma: Float,            // mean luma of selected tiles across phase 1
         val acceptable: Boolean             // false if best score is too weak
     ) {
         override fun equals(other: Any?): Boolean = this === other
@@ -51,14 +52,14 @@ object RoiSelector {
         val n = tilesPerFrame.size
         val nTiles = gridCols * gridRows
         if (n < 16) {
-            return centeredFallback(gridCols, gridRows, topK, sampleRateHz = 0f)
+            return centeredFallback(gridCols, gridRows, topK, 0f, tilesPerFrame)
         }
 
         val t0 = tilesPerFrame.first().timestampNs
         val tEnd = tilesPerFrame.last().timestampNs
         val durSec = ((tEnd - t0) / 1e9).toFloat()
         val fs = if (durSec > 0f) (n - 1) / durSec else 30f
-        if (fs < 5f) return centeredFallback(gridCols, gridRows, topK, fs)
+        if (fs < 5f) return centeredFallback(gridCols, gridRows, topK, fs, tilesPerFrame)
 
         // Build per-tile time series, then linearly resample onto a uniform grid.
         val uniformN = n
@@ -161,30 +162,23 @@ object RoiSelector {
         }
 
         if (picked.isEmpty() || score[picked[0]] < minScore) {
-            return centeredFallback(gridCols, gridRows, topK, fs).copy(
-                acceptable = false,
-                medianFreqHz = medianFreq,
-                sampleRateHz = fs
-            )
+            return centeredFallback(gridCols, gridRows, topK, fs, tilesPerFrame)
+                .copy(medianFreqHz = medianFreq, sampleRateHz = fs)
         }
 
+        val pickedArr = picked.toIntArray()
         var rMin = Int.MAX_VALUE; var rMax = Int.MIN_VALUE
         var cMin = Int.MAX_VALUE; var cMax = Int.MIN_VALUE
-        for (idx in picked) {
+        for (idx in pickedArr) {
             val r = idx / gridCols; val c = idx % gridCols
             if (r < rMin) rMin = r; if (r > rMax) rMax = r
             if (c < cMin) cMin = c; if (c > cMax) cMax = c
         }
 
-        // Expand to full bounding box (include any tiles inside the box, even if not in top-K).
-        val bboxIndices = ArrayList<Int>()
-        for (r in rMin..rMax) for (c in cMin..cMax) {
-            val i = r * gridCols + c
-            if (!saturated[i]) bboxIndices += i
-        }
+        val baselineLuma = meanLumaOver(pickedArr, tilesPerFrame)
 
         return Result(
-            tileIndices = bboxIndices.toIntArray(),
+            tileIndices = pickedArr,
             bboxRowStart = rMin,
             bboxRowEnd = rMax,
             bboxColStart = cMin,
@@ -192,20 +186,40 @@ object RoiSelector {
             bestScore = score[picked[0]],
             medianFreqHz = medianFreq,
             sampleRateHz = fs,
+            baselineLuma = baselineLuma,
             acceptable = true
         )
     }
 
-    private fun centeredFallback(cols: Int, rows: Int, topK: Int, sampleRateHz: Float): Result {
-        // 4×3 cluster centered in the frame.
+    private fun meanLumaOver(
+        tileIndices: IntArray,
+        frames: List<TileGridAnalyzer.TileSample>
+    ): Float {
+        if (tileIndices.isEmpty() || frames.isEmpty()) return 0f
+        var sum = 0.0; var count = 0
+        for (frame in frames) {
+            for (idx in tileIndices) {
+                val v = frame.tilesY.getOrNull(idx) ?: continue
+                sum += v
+                count++
+            }
+        }
+        return if (count > 0) (sum / count).toFloat() else 0f
+    }
+
+    private fun centeredFallback(
+        cols: Int, rows: Int, topK: Int, sampleRateHz: Float,
+        frames: List<TileGridAnalyzer.TileSample>
+    ): Result {
         val rMin = (rows / 2 - 1).coerceAtLeast(0)
         val rMax = (rows / 2).coerceAtMost(rows - 1)
         val cMin = (cols / 2 - 2).coerceAtLeast(0)
         val cMax = (cols / 2 + 1).coerceAtMost(cols - 1)
         val list = ArrayList<Int>()
         for (r in rMin..rMax) for (c in cMin..cMax) list += r * cols + c
+        val pickedArr = list.toIntArray().copyOf(topK.coerceAtMost(list.size))
         return Result(
-            tileIndices = list.toIntArray().copyOf(topK.coerceAtMost(list.size)),
+            tileIndices = pickedArr,
             bboxRowStart = rMin,
             bboxRowEnd = rMax,
             bboxColStart = cMin,
@@ -213,6 +227,7 @@ object RoiSelector {
             bestScore = 0f,
             medianFreqHz = 1f,
             sampleRateHz = sampleRateHz,
+            baselineLuma = meanLumaOver(pickedArr, frames),
             acceptable = false
         )
     }

@@ -94,6 +94,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     @Volatile private var phaseRef: Phase = Phase.Idle
     @Volatile private var roiTiles: IntArray = IntArray(0)
     @Volatile private var nTilesTotal: Int = 0
+    @Volatile private var baselineLuma: Float = 0f
+    @Volatile private var lumaThreshold: Float = 0f
 
     private val searchBuffer = ArrayDeque<TileGridAnalyzer.TileSample>()
 
@@ -120,27 +122,26 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
                 if (n == 0) return@TileGridAnalyzer
                 val red = sumR / n
                 val luma = sumY / n
-                // Coverage = fraction of selected tiles whose luma is above the bright-finger threshold.
-                var bright = 0
-                for (idx in tiles) {
-                    val y = sample.tilesY.getOrNull(idx) ?: continue
-                    if (y > BRIGHT_LUMA) bright++
-                }
-                val coverage = (bright.toFloat() / tiles.size).coerceIn(0f, 1f)
-                latestCoverage = coverage
+
+                // Coverage = current luma as a fraction of the phase-1 baseline.
+                // This self-calibrates per recording, so dim ROIs aren't penalised.
+                val ref = lumaThreshold
+                val coverage = if (ref > 0f) (luma / ref).coerceIn(0f, 1.5f) else 0f
+                latestCoverage = coverage.coerceIn(0f, 1f)
 
                 recorder.appendSample(
                     SessionRecorder.SampleRow(
-                        tNs = sample.timestampNs, red = red, luma = luma, coverage = coverage
+                        tNs = sample.timestampNs, red = red, luma = luma, coverage = latestCoverage
                     )
                 )
 
-                if (coverage >= GOOD_COVERAGE) {
+                val good = luma >= ref || ref <= 0f
+                if (good) {
                     val ts = sample.timestampNs
                     val gap = ts - lastGoodTNs
                     if (lastGoodTNs > 0L && gap in 1L..MAX_GOOD_GAP_NS) goodNs += gap
                     lastGoodTNs = ts
-                    processor.addSample(ts, red, coverage)
+                    processor.addSample(ts, red, latestCoverage)
                 } else {
                     lastGoodTNs = 0L
                 }
@@ -261,6 +262,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             acceptable = result.acceptable
         )
         roiTiles = result.tileIndices
+        baselineLuma = result.baselineLuma
+        lumaThreshold = (result.baselineLuma * GOOD_LUMA_FRACTION).coerceAtLeast(15f)
         // Open a recording session now that we know the ROI.
         recorder.start()
         phaseRef = Phase.Measuring
@@ -355,10 +358,10 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         const val GRID_COLS = 16
         const val GRID_ROWS = 12
         private const val GOOD_COVERAGE = 0.85f
-        private const val BRIGHT_LUMA = 80f
+        private const val GOOD_LUMA_FRACTION = 0.5f      // current luma must be ≥ 50% of phase-1 baseline
         private const val MAX_GOOD_GAP_NS = 250_000_000L
         private const val REFRESH_MS = 100L
-        private const val ROI_TOP_K = 6
+        private const val ROI_TOP_K = 10
         private const val SEARCH_BUFFER_MAX = 360       // cap memory if fs spikes (12 s at 30 Hz)
     }
 }
