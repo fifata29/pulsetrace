@@ -46,7 +46,9 @@ class CalibrationViewModel(application: Application) : AndroidViewModel(applicat
         sampleCount++
         if (firstSampleNs == 0L) firstSampleNs = sample.timestampNs
         lastSampleNs = sample.timestampNs
-        latestCenterLuma = sample.centerLuma
+        // Center-tile luma proxy — used by the UI to flag saturation / no contact.
+        val centerIdx = (GRID_ROWS / 2) * GRID_COLS + (GRID_COLS / 2)
+        latestCenterLuma = sample.tilesY.getOrNull(centerIdx) ?: 0f
     }
 
     fun start() {

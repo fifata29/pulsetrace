@@ -96,7 +96,6 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     @Volatile private var nTilesTotal: Int = 0
 
     private val searchBuffer = ArrayDeque<TileGridAnalyzer.TileSample>()
-    private val searchMutex = Mutex()
 
     val analyzer = TileGridAnalyzer(GRID_COLS, GRID_ROWS) { sample ->
         nTilesTotal = sample.tilesR.size
