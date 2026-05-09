@@ -2,15 +2,18 @@ package dk.nst.hrvmonitor.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.util.Size
+import android.util.Size as AndroidSize
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,13 +24,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
@@ -36,6 +41,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,11 +50,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -59,8 +69,10 @@ import dk.nst.hrvmonitor.ui.components.RrTachogram
 import dk.nst.hrvmonitor.ui.components.SignalChart
 import dk.nst.hrvmonitor.ui.theme.OnSurfaceMuted
 import dk.nst.hrvmonitor.ui.theme.Pulse
+import dk.nst.hrvmonitor.ui.theme.SurfaceDark
 import dk.nst.hrvmonitor.ui.theme.SurfaceElev
 import dk.nst.hrvmonitor.viewmodel.MeasurementViewModel
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 @Composable
@@ -88,7 +100,6 @@ fun MeasurementScreen(viewModel: MeasurementViewModel = viewModel()) {
             .background(MaterialTheme.colorScheme.background)
     ) {
         if (hasCamera) {
-            CameraBinding(viewModel)
             ContentLayout(state, viewModel)
         } else {
             PermissionRequest(onRequest = { permissionLauncher.launch(Manifest.permission.CAMERA) })
@@ -112,7 +123,13 @@ private fun ContentLayout(
     ) {
         Spacer(Modifier.height(8.dp))
         Header(state.elapsedSec, state.isMeasuring)
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(14.dp))
+
+        CameraSection(
+            isMeasuring = state.isMeasuring,
+            analyzer = viewModel.analyzer
+        )
+        Spacer(Modifier.height(14.dp))
 
         BpmHero(bpm = state.metrics.bpm)
         Spacer(Modifier.height(14.dp))
@@ -160,7 +177,7 @@ private fun Header(elapsed: Float, isMeasuring: Boolean) {
             )
             Text(
                 if (isMeasuring) "Measuring · ${"%.1f".format(elapsed)}s"
-                else "Cover the rear camera with a fingertip",
+                else "Tap Start, then cover the rear lens with a fingertip",
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -262,45 +279,134 @@ private fun PermissionRequest(onRequest: () -> Unit) {
 }
 
 /**
- * Binds CameraX with torch on and a frame analyzer that streams samples to the ViewModel.
- * No preview is shown — the camera is used purely as a sensor.
+ * Live camera preview + lifecycle. Camera is only bound (and torch only on) while
+ * [isMeasuring] is true. When idle, shows a placeholder so the user knows where the
+ * preview will appear. While measuring, draws an ROI guide so the user can confirm
+ * the fingertip is covering the analysis window.
  */
 @Composable
-private fun CameraBinding(viewModel: MeasurementViewModel) {
+private fun CameraSection(
+    isMeasuring: Boolean,
+    analyzer: ImageAnalysis.Analyzer,
+    modifier: Modifier = Modifier
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    LaunchedEffect(Unit) {
-        val providerFuture = ProcessCameraProvider.getInstance(context)
-        val executor = Executors.newSingleThreadExecutor()
-        providerFuture.addListener({
-            val provider = providerFuture.get()
-            val resolution = ResolutionSelector.Builder()
-                .setResolutionStrategy(
-                    ResolutionStrategy(
-                        Size(640, 480),
-                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
-                    )
-                )
-                .build()
-            val analysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setResolutionSelector(resolution)
-                .build()
-                .also { it.setAnalyzer(executor, viewModel.analyzer) }
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            setBackgroundColor(android.graphics.Color.BLACK)
+        }
+    }
+    val analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
 
-            try {
-                provider.unbindAll()
-                val camera = provider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    analysis
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(170.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(SurfaceDark)
+    ) {
+        AndroidView(
+            factory = { previewView },
+            modifier = Modifier.fillMaxSize()
+        )
+        if (isMeasuring) {
+            // ROI guide overlay matches PpgAnalyzer's 40%-of-min-side ROI.
+            Canvas(Modifier.fillMaxSize()) {
+                val side = minOf(size.width, size.height) * 0.4f
+                val topLeft = Offset((size.width - side) / 2, (size.height - side) / 2)
+                drawRect(
+                    color = Color.White.copy(alpha = 0.55f),
+                    topLeft = topLeft,
+                    size = Size(side, side),
+                    style = Stroke(width = 2.5f)
                 )
-                camera.cameraControl.enableTorch(true)
-            } catch (_: Exception) {
-                // ignored — surfaced via UI quality indicator
+                val tick = side * 0.18f
+                val cx = size.width / 2; val cy = size.height / 2
+                drawLine(Color.White.copy(alpha = 0.55f),
+                    Offset(cx - tick, cy), Offset(cx + tick, cy), strokeWidth = 2.5f)
+                drawLine(Color.White.copy(alpha = 0.55f),
+                    Offset(cx, cy - tick), Offset(cx, cy + tick), strokeWidth = 2.5f)
+            }
+        } else {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Fingerprint,
+                    contentDescription = null,
+                    tint = OnSurfaceMuted,
+                    modifier = Modifier.size(40.dp)
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Camera off",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    "Tap Start to enable preview, torch, and measurement",
+                    color = OnSurfaceMuted,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(isMeasuring) {
+        val providerFuture = ProcessCameraProvider.getInstance(context)
+        providerFuture.addListener({
+            val provider = try { providerFuture.get() } catch (_: Exception) { return@addListener }
+            if (isMeasuring) {
+                val resolution = ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            AndroidSize(640, 480),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                        )
+                    )
+                    .build()
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setResolutionSelector(resolution)
+                    .build()
+                    .also { it.setAnalyzer(analysisExecutor, analyzer) }
+
+                val preview = Preview.Builder()
+                    .build()
+                    .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+                try {
+                    provider.unbindAll()
+                    val camera = provider.bindToLifecycle(
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        analysis
+                    )
+                    camera.cameraControl.enableTorch(true)
+                } catch (_: Exception) {
+                    // Surface via QualityBar — ignore here.
+                }
+            } else {
+                try { provider.unbindAll() } catch (_: Exception) {}
             }
         }, ContextCompat.getMainExecutor(context))
     }
-}
 
+    DisposableEffect(Unit) {
+        onDispose {
+            val providerFuture = ProcessCameraProvider.getInstance(context)
+            providerFuture.addListener({
+                try { providerFuture.get().unbindAll() } catch (_: Exception) {}
+            }, ContextCompat.getMainExecutor(context))
+            analysisExecutor.shutdown()
+        }
+    }
+}
