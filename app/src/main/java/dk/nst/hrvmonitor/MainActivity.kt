@@ -12,9 +12,10 @@ import androidx.compose.runtime.setValue
 import androidx.core.view.WindowCompat
 import dk.nst.hrvmonitor.ui.CalibrationScreen
 import dk.nst.hrvmonitor.ui.MeasurementScreen
+import dk.nst.hrvmonitor.ui.SessionsScreen
 import dk.nst.hrvmonitor.ui.theme.HrvMonitorTheme
 
-private enum class Screen { Measure, Calibrate }
+private enum class Screen { Measure, Calibrate, Sessions }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -34,9 +35,13 @@ private fun AppRoot() {
     var screen by remember { mutableStateOf(Screen.Measure) }
     when (screen) {
         Screen.Measure -> MeasurementScreen(
-            onOpenCalibrate = { screen = Screen.Calibrate }
+            onOpenCalibrate = { screen = Screen.Calibrate },
+            onOpenSessions = { screen = Screen.Sessions }
         )
         Screen.Calibrate -> CalibrationScreen(
+            onBack = { screen = Screen.Measure }
+        )
+        Screen.Sessions -> SessionsScreen(
             onBack = { screen = Screen.Measure }
         )
     }

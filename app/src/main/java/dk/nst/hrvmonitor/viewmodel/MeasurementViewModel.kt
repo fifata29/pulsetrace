@@ -75,7 +75,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         val rrMs: List<Float>,
         val peaks: List<SignalProcessor.Peak>,
         val sessionPath: String?,
-        val roi: RoiInfo?
+        val roi: RoiInfo?,
+        val spectralBpm: Float = 0f
     )
 
     private val processor = SignalProcessor(windowSeconds = 60f)
@@ -311,7 +312,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             roi = recRoi,
             goodSec = goodSec,
             targetGoodSec = TARGET_GOOD_SEC,
-            timedOut = timedOut
+            timedOut = timedOut,
+            spectralBpm = snap.spectralBpm
         )
 
         val report = Report(
@@ -325,7 +327,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             rrMs = snap.rrMs,
             peaks = snap.peaks,
             sessionPath = session?.dir?.absolutePath,
-            roi = _state.value.roi
+            roi = _state.value.roi,
+            spectralBpm = snap.spectralBpm
         )
 
         _state.value = _state.value.copy(

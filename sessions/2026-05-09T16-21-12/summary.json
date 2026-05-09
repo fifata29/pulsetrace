@@ -1,0 +1,34 @@
+{
+  "session_id": "2026-05-09T16-21-12",
+  "started_at": 1778336472741,
+  "duration_sec": 5.074,
+  "good_sec": 2.443,
+  "target_good_sec": 50.000,
+  "timed_out": true,
+  "sample_rate_hz": 24.052,
+  "n_samples": 152,
+  "coverage": 1.0000,
+  "device": "OnePlus CPH2449 / API 36",
+  "roi": {
+    "grid_cols": 16,
+    "grid_rows": 12,
+    "row_start": 0,
+    "row_end": 11,
+    "col_start": 3,
+    "col_end": 9,
+    "tile_indices": [9,25,73,57,88,41,72,87,71,179],
+    "best_score": 17.0597,
+    "median_freq_hz": 1.525,
+    "acceptable": true
+  },
+  "metrics": {
+    "bpm": 71.276,
+    "rmssd_ms": 89.287,
+    "sdnn_ms": 59.524,
+    "pnn50_pct": 50.000,
+    "valid_beats": 3,
+    "total_beats": 4
+  },
+  "rr_intervals_ms": [841.80,505.08,841.80,715.53],
+  "peak_times_sec": [0.2104,1.0522,1.5573,2.3991,3.1147]
+}

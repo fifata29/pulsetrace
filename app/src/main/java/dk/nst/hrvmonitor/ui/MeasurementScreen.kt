@@ -3,10 +3,12 @@ package dk.nst.hrvmonitor.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.hardware.camera2.CaptureRequest
+import android.util.Range
 import android.util.Size as AndroidSize
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -33,6 +35,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
@@ -82,6 +85,7 @@ import java.util.concurrent.Executors
 @Composable
 fun MeasurementScreen(
     onOpenCalibrate: () -> Unit = {},
+    onOpenSessions: () -> Unit = {},
     viewModel: MeasurementViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -115,7 +119,7 @@ fun MeasurementScreen(
         }
     ) { padding ->
         if (hasCamera) {
-            ContentLayout(state, viewModel, padding, onOpenCalibrate)
+            ContentLayout(state, viewModel, padding, onOpenCalibrate, onOpenSessions)
         } else {
             PermissionRequest(
                 modifier = Modifier.padding(padding),
@@ -134,7 +138,8 @@ private fun ContentLayout(
     state: MeasurementViewModel.UiState,
     viewModel: MeasurementViewModel,
     padding: androidx.compose.foundation.layout.PaddingValues,
-    onOpenCalibrate: () -> Unit
+    onOpenCalibrate: () -> Unit,
+    onOpenSessions: () -> Unit
 ) {
     Column(
         Modifier
@@ -142,7 +147,7 @@ private fun ContentLayout(
             .padding(padding)
             .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Header(state.phase, onOpenCalibrate)
+        Header(state.phase, onOpenCalibrate, onOpenSessions)
         Spacer(Modifier.height(8.dp))
 
         CameraSection(
@@ -186,7 +191,11 @@ private fun ContentLayout(
 }
 
 @Composable
-private fun Header(phase: MeasurementViewModel.Phase, onOpenCalibrate: () -> Unit) {
+private fun Header(
+    phase: MeasurementViewModel.Phase,
+    onOpenCalibrate: () -> Unit,
+    onOpenSessions: () -> Unit
+) {
     val active = phase == MeasurementViewModel.Phase.Searching ||
         phase == MeasurementViewModel.Phase.Measuring
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -210,6 +219,9 @@ private fun Header(phase: MeasurementViewModel.Phase, onOpenCalibrate: () -> Uni
             )
         }
         if (!active) {
+            IconButton(onClick = onOpenSessions) {
+                Icon(Icons.Filled.History, contentDescription = "History", tint = Color.White)
+            }
             IconButton(onClick = onOpenCalibrate) {
                 Icon(Icons.Filled.Tune, contentDescription = "Calibrate", tint = Color.White)
             }
@@ -409,10 +421,15 @@ private fun CameraSection(
                         )
                     )
                     .build()
-                val analysis = ImageAnalysis.Builder()
+                val analysisBuilder = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setResolutionSelector(resolution)
-                    .build()
+                Camera2Interop.Extender(analysisBuilder)
+                    .setCaptureRequestOption(
+                        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                        Range(30, 30)
+                    )
+                val analysis = analysisBuilder.build()
                     .also { it.setAnalyzer(analysisExecutor, analyzer) }
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)

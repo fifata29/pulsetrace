@@ -120,7 +120,8 @@ class SessionRecorder(private val appContext: Context) {
         roi: RoiInfo? = null,
         goodSec: Float = 0f,
         targetGoodSec: Float = 0f,
-        timedOut: Boolean = false
+        timedOut: Boolean = false,
+        spectralBpm: Float = 0f
     ): Session? {
         val session = current ?: return null
         finishWriterIfActive()
@@ -131,7 +132,7 @@ class SessionRecorder(private val appContext: Context) {
                     w.write(buildSummaryJson(
                         session, durationSec, sampleRateHz, coverage,
                         peaks, rrMs, metrics, samplesWritten,
-                        roi, goodSec, targetGoodSec, timedOut
+                        roi, goodSec, targetGoodSec, timedOut, spectralBpm
                     ))
                 }
                 Log.i(TAG, "Summary written to ${session.summaryJson.absolutePath}")
@@ -160,7 +161,8 @@ class SessionRecorder(private val appContext: Context) {
         roi: RoiInfo?,
         goodSec: Float,
         targetGoodSec: Float,
-        timedOut: Boolean
+        timedOut: Boolean,
+        spectralBpm: Float
     ): String = buildString {
         append("{\n")
         append("  \"session_id\": \"${s.dir.name}\",\n")
@@ -189,6 +191,7 @@ class SessionRecorder(private val appContext: Context) {
         }
         append("  \"metrics\": {\n")
         append("    \"bpm\": ${num(metrics.bpm)},\n")
+        append("    \"spectral_bpm\": ${"%.3f".format(Locale.US, spectralBpm)},\n")
         append("    \"rmssd_ms\": ${num(metrics.rmssdMs)},\n")
         append("    \"sdnn_ms\": ${num(metrics.sdnnMs)},\n")
         append("    \"pnn50_pct\": ${num(metrics.pnn50)},\n")

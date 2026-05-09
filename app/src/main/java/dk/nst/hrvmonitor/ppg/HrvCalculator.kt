@@ -63,13 +63,28 @@ object HrvCalculator {
         )
     }
 
+    /**
+     * Median-based outlier rejection. The previous sequential filter latched onto the
+     * first in-range RR; if that was a filter-ringing artifact, every real beat
+     * downstream got rejected and BPM ended up at 180+ from a tiny noise cluster.
+     *
+     * Now: compute the median of all physiologically-plausible RRs (300–2000 ms) and
+     * reject anything more than [REJECT_FRACTION] away from it. One refinement pass
+     * tightens the median once obvious outliers are gone.
+     */
     private fun filterOutliers(rrMs: List<Float>): List<Float> {
-        val out = ArrayList<Float>(rrMs.size)
-        for ((i, v) in rrMs.withIndex()) {
-            if (v < 300f || v > 2000f) continue
-            val ref = if (out.isNotEmpty()) out.last() else rrMs[i]
-            if (abs(v - ref) / ref <= 0.20f) out += v
-        }
-        return out
+        val inRange = rrMs.filter { it in 300f..2000f }
+        if (inRange.size < 3) return inRange
+
+        var ref = inRange.sorted()[inRange.size / 2]
+        var accepted = inRange.filter { kotlin.math.abs(it - ref) / ref <= REJECT_FRACTION }
+        if (accepted.size < 3) return accepted
+
+        // Refine: recompute median on the cleaned set, re-apply the same threshold.
+        ref = accepted.sorted()[accepted.size / 2]
+        accepted = inRange.filter { kotlin.math.abs(it - ref) / ref <= REJECT_FRACTION }
+        return accepted
     }
+
+    private const val REJECT_FRACTION = 0.25f
 }

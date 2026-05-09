@@ -1,8 +1,10 @@
 package dk.nst.hrvmonitor.ui
 
 import android.hardware.camera2.CaptureRequest
+import android.util.Range
 import android.util.Size as AndroidSize
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -106,10 +108,15 @@ fun CalibrationScreen(
                     )
                 ).build()
 
-            val analysis = ImageAnalysis.Builder()
+            val analysisBuilder = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setResolutionSelector(resolution)
-                .build()
+            Camera2Interop.Extender(analysisBuilder)
+                .setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    Range(30, 30)
+                )
+            val analysis = analysisBuilder.build()
                 .also { it.setAnalyzer(analysisExecutor, viewModel.analyzer) }
 
             val preview = Preview.Builder().build().also {

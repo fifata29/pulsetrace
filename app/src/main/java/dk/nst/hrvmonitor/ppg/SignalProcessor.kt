@@ -26,7 +26,8 @@ class SignalProcessor(
         val samples: List<Sample>,
         val peaks: List<Peak>,
         val rrMs: List<Float>,        // RR intervals in milliseconds, oldest first
-        val coverage: Float            // last-known fingertip coverage
+        val coverage: Float,           // last-known fingertip coverage
+        val spectralBpm: Float = 0f    // dominant-frequency BPM as an independent sanity check
     )
 
     private val raw = ArrayDeque<TimedSample>()
@@ -50,7 +51,7 @@ class SignalProcessor(
     fun snapshot(): Snapshot {
         val n = raw.size
         if (n < 16) {
-            return Snapshot(0f, emptyList(), emptyList(), emptyList(), lastCoverage)
+            return Snapshot(0f, emptyList(), emptyList(), emptyList(), lastCoverage, 0f)
         }
 
         val t0 = raw.first().tNs
@@ -80,8 +81,18 @@ class SignalProcessor(
         // Bandpass via cascaded biquads.
         val filtered = butterworthBandpass(detrended, fs, lowHz, highHz)
 
-        // Peak detect on filtered signal.
-        val peakIdx = findPeaks(filtered, fs, minSeparationSec = 0.30f)
+        // Edge-trim peak detection: filtfilt rings at both signal boundaries.
+        // Discarding ~1.5 s on each end removes those bogus spikes that previously
+        // contaminated the very first and last RR intervals.
+        val edgeTrim = (1.5f * fs).toInt().coerceAtLeast(8).coerceAtMost(uniformN / 3)
+        val safeStart = edgeTrim
+        val safeEnd = uniformN - edgeTrim
+        val peakIdx = if (safeEnd > safeStart + 4) {
+            findPeaks(filtered, fs, minSeparationSec = 0.35f, fromIdx = safeStart, toIdx = safeEnd)
+        } else IntArray(0)
+
+        // Spectral BPM as a sanity check, computed independently from peak detection.
+        val spectralBpm = dominantBpm(filtered, fs, lowHz, highHz)
 
         val samples = ArrayList<Sample>(uniformN)
         for (i in 0 until uniformN) {
@@ -100,7 +111,28 @@ class SignalProcessor(
             rr += (peaks[i].tSec - peaks[i - 1].tSec) * 1000f
         }
 
-        return Snapshot(fs, samples, peaks, rr, lastCoverage)
+        return Snapshot(fs, samples, peaks, rr, lastCoverage, spectralBpm)
+    }
+
+    /** Dominant frequency in [lowHz, highHz] via Goertzel-like DFT scan, returned as BPM. */
+    private fun dominantBpm(x: FloatArray, fs: Float, lowHz: Float, highHz: Float): Float {
+        if (x.size < 32) return 0f
+        var bestF = lowHz
+        var bestPow = -1.0
+        var f = lowHz
+        while (f <= highHz) {
+            val w = 2.0 * PI * f / fs
+            var sumC = 0.0; var sumS = 0.0
+            for (i in x.indices) {
+                val v = x[i].toDouble()
+                sumC += v * cos(w * i)
+                sumS += v * sin(w * i)
+            }
+            val pow = sumC * sumC + sumS * sumS
+            if (pow > bestPow) { bestPow = pow; bestF = f }
+            f += 0.05f
+        }
+        return bestF * 60f
     }
 
     private data class TimedSample(val tNs: Long, val red: Float)
@@ -177,20 +209,32 @@ class SignalProcessor(
         return y
     }
 
-    /** Simple peak detection with adaptive prominence and minimum spacing. */
-    private fun findPeaks(x: FloatArray, fs: Float, minSeparationSec: Float): IntArray {
-        if (x.size < 3) return IntArray(0)
-        val minSep = (minSeparationSec * fs).toInt().coerceAtLeast(1)
+    /**
+     * Adaptive peak detection. Uses ceil() so a 350 ms floor is exactly 350 ms;
+     * `(0.30 * 29.97).toInt() = 8` previously allowed 267 ms RRs (≈225 BPM).
+     * [fromIdx]/[toIdx] let callers exclude the edge-ringing zones.
+     */
+    private fun findPeaks(
+        x: FloatArray, fs: Float, minSeparationSec: Float,
+        fromIdx: Int = 0, toIdx: Int = x.size
+    ): IntArray {
+        val start = fromIdx.coerceAtLeast(1)
+        val end = toIdx.coerceAtMost(x.size - 1)
+        if (end <= start + 1) return IntArray(0)
 
-        // Adaptive threshold: 30% of recent positive RMS.
+        val minSep = kotlin.math.ceil(minSeparationSec * fs).toInt().coerceAtLeast(2)
+
+        // Adaptive threshold: 30% of recent positive RMS over the inspected window.
         var sumSq = 0f; var count = 0
-        for (v in x) if (v > 0) { sumSq += v * v; count++ }
+        for (i in start until end) {
+            val v = x[i]; if (v > 0f) { sumSq += v * v; count++ }
+        }
         val rmsPos = if (count > 0) sqrt(sumSq / count) else 0f
         val threshold = 0.30f * rmsPos
 
         val peaks = ArrayList<Int>()
         var lastPeak = -minSep
-        for (i in 1 until x.size - 1) {
+        for (i in start until end) {
             if (x[i] > x[i - 1] && x[i] >= x[i + 1] && x[i] > threshold &&
                 i - lastPeak >= minSep) {
                 peaks += i
