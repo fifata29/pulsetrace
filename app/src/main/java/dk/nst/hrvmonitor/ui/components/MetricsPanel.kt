@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,62 +40,79 @@ import dk.nst.hrvmonitor.ui.theme.Warn
 import kotlin.math.roundToInt
 
 @Composable
-fun BpmHero(bpm: Float?, modifier: Modifier = Modifier) {
-    val target = bpm ?: 0f
+fun BpmHero(
+    bpm: Float?,
+    isMeasuring: Boolean,
+    elapsedSec: Float,
+    targetSec: Float,
+    progress: Float,
+    modifier: Modifier = Modifier
+) {
     val animated by animateFloatAsState(
-        targetValue = target,
+        targetValue = bpm ?: 0f,
         animationSpec = tween(durationMillis = 400),
         label = "bpm"
     )
-    Box(
+    Column(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
+            .clip(RoundedCornerShape(24.dp))
             .background(
                 Brush.linearGradient(listOf(Pulse.copy(alpha = 0.18f), Accent.copy(alpha = 0.08f)))
             )
-            .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(28.dp))
-            .padding(horizontal = 24.dp, vertical = 20.dp)
+            .border(1.dp, Color.White.copy(alpha = 0.05f), RoundedCornerShape(24.dp))
+            .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                PulseDot()
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "Live heart rate",
-                    color = OnSurfaceMuted,
-                    style = MaterialTheme.typography.labelLarge
-                )
-            }
-            Spacer(Modifier.height(4.dp))
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    text = if (bpm == null) "—" else animated.roundToInt().toString(),
-                    fontSize = 88.sp,
-                    fontWeight = FontWeight.Light,
-                    color = Color.White,
-                    style = MaterialTheme.typography.displayLarge.copy(letterSpacing = (-3).sp)
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "BPM",
-                    color = PulseSoft,
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.padding(bottom = 18.dp)
-                )
-            }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(if (isMeasuring) Pulse else OnSurfaceMuted))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (isMeasuring) "Live" else "Idle",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                "${formatTime(elapsedSec)} / ${formatTime(targetSec)}",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelLarge
+            )
         }
+        Spacer(Modifier.height(2.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                text = if (bpm == null) "—" else animated.roundToInt().toString(),
+                fontSize = 64.sp,
+                fontWeight = FontWeight.Light,
+                color = Color.White,
+                style = MaterialTheme.typography.displayMedium.copy(letterSpacing = (-2).sp)
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "BPM",
+                color = PulseSoft,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(bottom = 12.dp)
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            progress = { progress.coerceIn(0f, 1f) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp)),
+            color = Pulse,
+            trackColor = Color.White.copy(alpha = 0.10f)
+        )
     }
 }
 
-@Composable
-private fun PulseDot() {
-    Box(
-        Modifier
-            .size(8.dp)
-            .clip(CircleShape)
-            .background(Pulse)
-    )
+private fun formatTime(sec: Float): String {
+    val s = sec.coerceAtLeast(0f).toInt()
+    val m = s / 60
+    val r = s % 60
+    return "%d:%02d".format(m, r)
 }
 
 @Composable
@@ -106,7 +124,7 @@ fun HrvMetricsRow(
 ) {
     Row(
         modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         MetricCard("RMSSD", formatMs(rmssd), "ms", Modifier.weight(1f))
         MetricCard("SDNN", formatMs(sdnn), "ms", Modifier.weight(1f))
@@ -118,25 +136,16 @@ fun HrvMetricsRow(
 private fun MetricCard(label: String, value: String, unit: String, modifier: Modifier = Modifier) {
     Column(
         modifier
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(SurfaceElev)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Text(label, color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
-        Spacer(Modifier.height(6.dp))
+        Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                value,
-                color = Color.White,
-                style = MaterialTheme.typography.headlineMedium
-            )
-            Spacer(Modifier.width(4.dp))
-            Text(
-                unit,
-                color = OnSurfaceMuted,
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(bottom = 4.dp)
-            )
+            Text(value, color = Color.White, style = MaterialTheme.typography.headlineMedium.copy(fontSize = 22.sp))
+            Spacer(Modifier.width(3.dp))
+            Text(unit, color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(bottom = 3.dp))
         }
     }
 }
@@ -156,25 +165,16 @@ fun QualityBar(coverage: Float, sampleRateHz: Float, modifier: Modifier = Modifi
     Row(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(SurfaceElev)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            Modifier
-                .size(10.dp)
-                .clip(CircleShape)
-                .background(color)
-        )
-        Spacer(Modifier.width(10.dp))
+        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+        Spacer(Modifier.width(8.dp))
         Text(label, color = Color.White, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.weight(1f))
-        Text(
-            "${sampleRateHz.roundToInt()} Hz",
-            color = OnSurfaceMuted,
-            style = MaterialTheme.typography.labelSmall
-        )
+        Text("${sampleRateHz.roundToInt()} Hz", color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
     }
 }
 

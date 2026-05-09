@@ -12,7 +12,6 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -25,12 +24,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.PlayArrow
@@ -39,6 +34,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -65,7 +61,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dk.nst.hrvmonitor.ui.components.BpmHero
 import dk.nst.hrvmonitor.ui.components.HrvMetricsRow
 import dk.nst.hrvmonitor.ui.components.QualityBar
-import dk.nst.hrvmonitor.ui.components.RrTachogram
+import dk.nst.hrvmonitor.ui.components.ReportSheet
 import dk.nst.hrvmonitor.ui.components.SignalChart
 import dk.nst.hrvmonitor.ui.theme.OnSurfaceMuted
 import dk.nst.hrvmonitor.ui.theme.Pulse
@@ -94,75 +90,79 @@ fun MeasurementScreen(viewModel: MeasurementViewModel = viewModel()) {
         if (!hasCamera) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-    ) {
-        if (hasCamera) {
-            ContentLayout(state, viewModel)
-        } else {
-            PermissionRequest(onRequest = { permissionLauncher.launch(Manifest.permission.CAMERA) })
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
+        bottomBar = {
+            if (hasCamera) {
+                BottomActionBar(
+                    isMeasuring = state.isMeasuring,
+                    onStart = { viewModel.start() },
+                    onStop = { viewModel.stop() }
+                )
+            }
         }
+    ) { padding ->
+        if (hasCamera) {
+            ContentLayout(state, viewModel, padding)
+        } else {
+            PermissionRequest(
+                modifier = Modifier.padding(padding),
+                onRequest = { permissionLauncher.launch(Manifest.permission.CAMERA) }
+            )
+        }
+    }
+
+    state.report?.let { report ->
+        ReportSheet(report = report, onDismiss = viewModel::dismissReport)
     }
 }
 
 @Composable
 private fun ContentLayout(
     state: MeasurementViewModel.UiState,
-    viewModel: MeasurementViewModel
+    viewModel: MeasurementViewModel,
+    padding: androidx.compose.foundation.layout.PaddingValues
 ) {
-    val scroll = rememberScrollState()
     Column(
         Modifier
             .fillMaxSize()
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .verticalScroll(scroll)
-            .padding(horizontal = 18.dp)
+            .padding(padding)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Spacer(Modifier.height(8.dp))
         Header(state.elapsedSec, state.isMeasuring)
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(8.dp))
 
         CameraSection(
             isMeasuring = state.isMeasuring,
             analyzer = viewModel.analyzer
         )
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(8.dp))
 
-        BpmHero(bpm = state.metrics.bpm)
-        Spacer(Modifier.height(14.dp))
+        BpmHero(
+            bpm = state.metrics.bpm,
+            isMeasuring = state.isMeasuring,
+            elapsedSec = state.elapsedSec,
+            targetSec = state.durationSec,
+            progress = state.progress
+        )
+        Spacer(Modifier.height(8.dp))
 
         QualityBar(coverage = state.coverage, sampleRateHz = state.sampleRateHz)
-        Spacer(Modifier.height(14.dp))
-
-        SectionLabel("PPG signal — filtered (red) over raw (blue), peaks aligned")
         Spacer(Modifier.height(8.dp))
-        SignalChart(samples = state.signal, peaks = state.peaks)
-        Spacer(Modifier.height(18.dp))
 
-        SectionLabel("RR tachogram — beat-to-beat intervals")
+        SignalChart(
+            samples = state.signal,
+            peaks = state.peaks,
+            modifier = Modifier.weight(1f, fill = true)
+        )
         Spacer(Modifier.height(8.dp))
-        RrTachogram(rrMs = state.rrMs)
-        Spacer(Modifier.height(18.dp))
 
-        SectionLabel("Heart rate variability")
-        Spacer(Modifier.height(8.dp))
         HrvMetricsRow(
             rmssd = state.metrics.rmssdMs,
             sdnn = state.metrics.sdnnMs,
             pnn50 = state.metrics.pnn50
         )
-        BeatCount(state.metrics.validBeats, state.metrics.totalBeats)
-        Spacer(Modifier.height(20.dp))
-
-        StartStopButton(
-            isMeasuring = state.isMeasuring,
-            onStart = { viewModel.start() },
-            onStop = { viewModel.stop() }
-        )
-        Spacer(Modifier.height(20.dp))
     }
 }
 
@@ -176,83 +176,55 @@ private fun Header(elapsed: Float, isMeasuring: Boolean) {
                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
             )
             Text(
-                if (isMeasuring) "Measuring · ${"%.1f".format(elapsed)}s"
+                if (isMeasuring) "Measuring · hold steady"
                 else "Tap Start, then cover the rear lens with a fingertip",
                 color = OnSurfaceMuted,
-                style = MaterialTheme.typography.bodyMedium
+                style = MaterialTheme.typography.labelSmall
             )
-        }
-        AnimatedVisibility(visible = isMeasuring) {
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Pulse.copy(alpha = 0.18f))
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    "REC",
-                    color = Pulse,
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
         }
     }
 }
 
 @Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text,
-        color = OnSurfaceMuted,
-        style = MaterialTheme.typography.labelLarge,
-        modifier = Modifier.padding(horizontal = 4.dp)
-    )
-}
-
-@Composable
-private fun BeatCount(valid: Int, total: Int) {
-    Spacer(Modifier.height(8.dp))
-    Text(
-        "$valid valid beats of $total detected",
-        color = OnSurfaceMuted,
-        style = MaterialTheme.typography.labelSmall,
-        modifier = Modifier.padding(horizontal = 4.dp)
-    )
-}
-
-@Composable
-private fun StartStopButton(
+private fun BottomActionBar(
     isMeasuring: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit
 ) {
-    Button(
-        onClick = if (isMeasuring) onStop else onStart,
-        modifier = Modifier
+    Box(
+        Modifier
             .fillMaxWidth()
-            .height(56.dp),
-        shape = RoundedCornerShape(20.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = if (isMeasuring) SurfaceElev else Pulse,
-            contentColor = Color.White
-        )
+            .background(MaterialTheme.colorScheme.background)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
-        Icon(
-            imageVector = if (isMeasuring) Icons.Filled.Stop else Icons.Filled.PlayArrow,
-            contentDescription = null
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            if (isMeasuring) "Stop" else "Start measurement",
-            style = MaterialTheme.typography.titleMedium
-        )
+        Button(
+            onClick = if (isMeasuring) onStop else onStart,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            shape = RoundedCornerShape(20.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isMeasuring) SurfaceElev else Pulse,
+                contentColor = Color.White
+            )
+        ) {
+            Icon(
+                imageVector = if (isMeasuring) Icons.Filled.Stop else Icons.Filled.PlayArrow,
+                contentDescription = null
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (isMeasuring) "Stop" else "Start measurement (30 s)",
+                style = MaterialTheme.typography.titleMedium
+            )
+        }
     }
 }
 
 @Composable
-private fun PermissionRequest(onRequest: () -> Unit) {
+private fun PermissionRequest(onRequest: () -> Unit, modifier: Modifier = Modifier) {
     Column(
-        Modifier
+        modifier
             .fillMaxSize()
             .padding(32.dp),
         verticalArrangement = Arrangement.Center,
@@ -280,9 +252,8 @@ private fun PermissionRequest(onRequest: () -> Unit) {
 
 /**
  * Live camera preview + lifecycle. Camera is only bound (and torch only on) while
- * [isMeasuring] is true. When idle, shows a placeholder so the user knows where the
- * preview will appear. While measuring, draws an ROI guide so the user can confirm
- * the fingertip is covering the analysis window.
+ * [isMeasuring] is true. While measuring, draws a centered ROI guide aligned with
+ * PpgAnalyzer's analysis window.
  */
 @Composable
 private fun CameraSection(
@@ -304,8 +275,8 @@ private fun CameraSection(
     Box(
         modifier
             .fillMaxWidth()
-            .height(170.dp)
-            .clip(RoundedCornerShape(20.dp))
+            .height(95.dp)
+            .clip(RoundedCornerShape(18.dp))
             .background(SurfaceDark)
     ) {
         AndroidView(
@@ -313,9 +284,8 @@ private fun CameraSection(
             modifier = Modifier.fillMaxSize()
         )
         if (isMeasuring) {
-            // ROI guide overlay matches PpgAnalyzer's 40%-of-min-side ROI.
             Canvas(Modifier.fillMaxSize()) {
-                val side = minOf(size.width, size.height) * 0.4f
+                val side = minOf(size.width, size.height) * 0.55f
                 val topLeft = Offset((size.width - side) / 2, (size.height - side) / 2)
                 drawRect(
                     color = Color.White.copy(alpha = 0.55f),
@@ -331,30 +301,27 @@ private fun CameraSection(
                     Offset(cx, cy - tick), Offset(cx, cy + tick), strokeWidth = 2.5f)
             }
         } else {
-            Column(
+            Row(
                 Modifier
                     .fillMaxSize()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
                     imageVector = Icons.Filled.Fingerprint,
                     contentDescription = null,
                     tint = OnSurfaceMuted,
-                    modifier = Modifier.size(40.dp)
+                    modifier = Modifier.size(28.dp)
                 )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Camera off",
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    "Tap Start to enable preview, torch, and measurement",
-                    color = OnSurfaceMuted,
-                    style = MaterialTheme.typography.labelSmall
-                )
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text("Camera off", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Tap Start to enable preview, torch & measurement",
+                        color = OnSurfaceMuted,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
             }
         }
     }

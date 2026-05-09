@@ -42,7 +42,6 @@ fun SignalChart(
     Box(
         modifier
             .fillMaxWidth()
-            .height(180.dp)
             .clip(RoundedCornerShape(20.dp))
             .background(MaterialTheme.colorScheme.surface)
             .padding(12.dp)

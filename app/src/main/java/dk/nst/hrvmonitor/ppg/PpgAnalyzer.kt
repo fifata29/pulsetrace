@@ -1,6 +1,7 @@
 package dk.nst.hrvmonitor.ppg
 
 import android.graphics.ImageFormat
+import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import java.nio.ByteBuffer
@@ -29,32 +30,37 @@ class PpgAnalyzer(
     override fun analyze(image: ImageProxy) {
         try {
             if (image.format != ImageFormat.YUV_420_888) return
+            if (image.planes.size < 3) return
 
             val width = image.width
             val height = image.height
+            if (width < 32 || height < 32) return
 
-            // Centered square ROI at 40% of the smaller dimension
-            val roiSize = (minOf(width, height) * 0.4f).toInt().coerceAtLeast(32)
-            val roiX = (width - roiSize) / 2
-            val roiY = (height - roiSize) / 2
+            val roiSize = (minOf(width, height) * 0.4f).toInt().coerceIn(16, minOf(width, height))
+            val roiSizeEven = (roiSize / 2) * 2
+            val roiX = ((width - roiSizeEven) / 2).coerceAtLeast(0)
+            val roiY = ((height - roiSizeEven) / 2).coerceAtLeast(0)
 
             val yPlane = image.planes[0]
             val vPlane = image.planes[2]
 
-            val ySum = sumPlane(yPlane.buffer, yPlane.rowStride, yPlane.pixelStride,
-                roiX, roiY, roiSize, roiSize)
+            val ySum = sumPlane(
+                yPlane.buffer, yPlane.rowStride, yPlane.pixelStride,
+                roiX, roiY, roiSizeEven, roiSizeEven
+            )
+            val vSum = sumPlane(
+                vPlane.buffer, vPlane.rowStride, vPlane.pixelStride,
+                roiX / 2, roiY / 2, roiSizeEven / 2, roiSizeEven / 2
+            )
 
-            // U/V planes are subsampled 2:1 in both dims for YUV_420
-            val vSum = sumPlane(vPlane.buffer, vPlane.rowStride, vPlane.pixelStride,
-                roiX / 2, roiY / 2, roiSize / 2, roiSize / 2)
+            val yPixels = ySum.count.toFloat()
+            val vPixels = vSum.count.toFloat()
+            if (yPixels <= 0f || vPixels <= 0f) return
 
-            val pixels = (roiSize * roiSize).toFloat()
-            val subPixels = ((roiSize / 2) * (roiSize / 2)).toFloat()
-
-            val meanY = ySum.sum / pixels
-            val meanV = vSum.sum / subPixels
+            val meanY = ySum.sum / yPixels
+            val meanV = vSum.sum / vPixels
             val red = (meanY + 1.402f * (meanV - 128f)).coerceIn(0f, 255f)
-            val coverage = ySum.brightCount / pixels
+            val coverage = (ySum.brightCount / yPixels).coerceIn(0f, 1f)
 
             onSample(
                 Sample(
@@ -64,12 +70,14 @@ class PpgAnalyzer(
                     coverage = coverage
                 )
             )
+        } catch (t: Throwable) {
+            Log.e(TAG, "frame analyze failed", t)
         } finally {
-            image.close()
+            try { image.close() } catch (_: Throwable) {}
         }
     }
 
-    private data class PlaneSum(val sum: Long, val brightCount: Long)
+    private data class PlaneSum(val sum: Long, val brightCount: Long, val count: Long)
 
     private fun sumPlane(
         buf: ByteBuffer,
@@ -77,22 +85,29 @@ class PpgAnalyzer(
         pixelStride: Int,
         x: Int, y: Int, w: Int, h: Int
     ): PlaneSum {
+        if (w <= 0 || h <= 0 || rowStride <= 0 || pixelStride <= 0) {
+            return PlaneSum(0L, 0L, 0L)
+        }
+        val limit = buf.limit()
         var sum = 0L
         var bright = 0L
+        var count = 0L
         for (row in 0 until h) {
             val base = (y + row) * rowStride + x * pixelStride
             for (col in 0 until w) {
-                val v = buf.get(base + col * pixelStride).toInt() and 0xFF
+                val idx = base + col * pixelStride
+                if (idx < 0 || idx >= limit) continue
+                val v = buf.get(idx).toInt() and 0xFF
                 sum += v
+                count++
                 if (v > COVERAGE_THRESHOLD) bright++
             }
         }
-        return PlaneSum(sum, bright)
+        return PlaneSum(sum, bright, count)
     }
 
     companion object {
-        // With torch + fingertip the luma is high and saturated red. Pixels below this
-        // threshold are likely "no finger" / leaking ambient light.
+        private const val TAG = "PpgAnalyzer"
         private const val COVERAGE_THRESHOLD = 100
     }
 }

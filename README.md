@@ -59,6 +59,22 @@ tachogram below shows beat-to-beat intervals — flat = low HRV, jagged = high H
 - **HRV outlier rule** — RR intervals are rejected if they're outside 300–2000 ms or differ
   by more than 20% from the previous valid interval. Keeps motion artifacts out of RMSSD.
 
+## Pulling raw data off the phone
+
+Each measurement writes a CSV (raw samples) and a JSON summary to the app's external
+files dir. The path is shown at the bottom of the report card after a recording ends,
+e.g. `/storage/emulated/0/Android/data/dk.nst.hrvmonitor.debug/files/sessions/2026-05-09T10-23-15/`.
+
+To pull all sessions to your PC over USB (with USB debugging on):
+
+```powershell
+C:\Android\adb.exe pull /sdcard/Android/data/dk.nst.hrvmonitor.debug/files/sessions/ .\sessions\
+```
+
+Each session folder contains:
+- `samples.csv` — `timestamp_ns, red, luma, coverage` (one row per camera frame)
+- `summary.json` — sample rate, metrics, RR intervals, peak times, device info
+
 ## Disclaimer
 
 This is a personal/wellness tool, not a medical device. The measurements aren't validated
