@@ -44,8 +44,10 @@ fun BpmHero(
     bpm: Float?,
     isMeasuring: Boolean,
     elapsedSec: Float,
-    targetSec: Float,
+    goodSec: Float,
+    targetGoodSec: Float,
     progress: Float,
+    isGoodSignal: Boolean,
     modifier: Modifier = Modifier
 ) {
     val animated by animateFloatAsState(
@@ -53,6 +55,7 @@ fun BpmHero(
         animationSpec = tween(durationMillis = 400),
         label = "bpm"
     )
+    val barColor = if (isGoodSignal || !isMeasuring) Pulse else Warn
     Column(
         modifier
             .fillMaxWidth()
@@ -64,16 +67,31 @@ fun BpmHero(
             .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(8.dp).clip(CircleShape).background(if (isMeasuring) Pulse else OnSurfaceMuted))
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            !isMeasuring -> OnSurfaceMuted
+                            isGoodSignal -> Pulse
+                            else -> Warn
+                        }
+                    )
+            )
             Spacer(Modifier.width(8.dp))
             Text(
-                if (isMeasuring) "Live" else "Idle",
-                color = OnSurfaceMuted,
+                when {
+                    !isMeasuring -> "Idle"
+                    isGoodSignal -> "Live"
+                    else -> "Paused"
+                },
+                color = if (isMeasuring && !isGoodSignal) Warn else OnSurfaceMuted,
                 style = MaterialTheme.typography.labelLarge
             )
             Spacer(Modifier.weight(1f))
             Text(
-                "${formatTime(elapsedSec)} / ${formatTime(targetSec)}",
+                "${formatTime(goodSec)} / ${formatTime(targetGoodSec)} good",
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.labelLarge
             )
@@ -94,6 +112,15 @@ fun BpmHero(
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(bottom = 12.dp)
             )
+            Spacer(Modifier.weight(1f))
+            if (isMeasuring) {
+                Text(
+                    "${formatTime(elapsedSec)} elapsed",
+                    color = OnSurfaceMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(bottom = 14.dp)
+                )
+            }
         }
         Spacer(Modifier.height(6.dp))
         LinearProgressIndicator(
@@ -102,9 +129,17 @@ fun BpmHero(
                 .fillMaxWidth()
                 .height(6.dp)
                 .clip(RoundedCornerShape(3.dp)),
-            color = Pulse,
+            color = barColor,
             trackColor = Color.White.copy(alpha = 0.10f)
         )
+        if (isMeasuring && !isGoodSignal) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Paused — press finger more firmly over lens & flash",
+                color = Warn,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
     }
 }
 

@@ -61,16 +61,26 @@ private fun ReportContent(report: MeasurementViewModel.Report, onDone: () -> Uni
             .padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
         Text(
-            "Recording complete",
-            color = Color.White,
+            if (report.timedOut) "Recording incomplete" else "Recording complete",
+            color = if (report.timedOut) Color(0xFFFFC078) else Color.White,
             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
         )
         Text(
-            "%.0f s · %.0f Hz · %d valid beats / %d detected"
-                .format(report.durationSec, report.sampleRateHz, report.metrics.validBeats, report.metrics.totalBeats),
+            "%.0f s good signal of %.0f s target · %.0f Hz · %d valid beats / %d detected"
+                .format(report.goodSec, report.targetGoodSec, report.sampleRateHz,
+                        report.metrics.validBeats, report.metrics.totalBeats),
             color = OnSurfaceMuted,
             style = MaterialTheme.typography.labelLarge
         )
+        if (report.timedOut) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Wall-clock cap reached before reaching ${report.targetGoodSec.toInt()} s of clean signal. " +
+                    "Metrics below are computed from what was captured — interpret with caution.",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         Spacer(Modifier.height(16.dp))
 
         InterpretationRow(
@@ -234,11 +244,8 @@ private fun pnn50Interpretation(v: Float?): String {
 
 private fun qualitySummary(r: MeasurementViewModel.Report): String {
     val parts = mutableListOf<String>()
-    parts += when {
-        r.coverage > 0.9f -> "Strong fingertip contact (${(r.coverage * 100).roundToInt()}% coverage)."
-        r.coverage > 0.6f -> "Partial contact — press more firmly next time."
-        else -> "Weak contact — finger likely off-centre or not blocking the lens fully."
-    }
+    val efficiency = if (r.durationSec > 0f) (100f * r.goodSec / r.durationSec).roundToInt() else 0
+    parts += "Captured ${r.goodSec.roundToInt()} s of clean signal in ${r.durationSec.roundToInt()} s wall-clock ($efficiency% efficient)."
     val rejectRate = if (r.metrics.totalBeats > 0)
         100 - (100 * r.metrics.validBeats / r.metrics.totalBeats) else 0
     if (rejectRate > 0) parts += "$rejectRate% of detected beats were rejected as outliers."

@@ -143,8 +143,10 @@ private fun ContentLayout(
             bpm = state.metrics.bpm,
             isMeasuring = state.isMeasuring,
             elapsedSec = state.elapsedSec,
-            targetSec = state.durationSec,
-            progress = state.progress
+            goodSec = state.goodSec,
+            targetGoodSec = state.targetGoodSec,
+            progress = state.progress,
+            isGoodSignal = state.isGoodSignal
         )
         Spacer(Modifier.height(8.dp))
 
@@ -214,7 +216,7 @@ private fun BottomActionBar(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                if (isMeasuring) "Stop" else "Start measurement (30 s)",
+                if (isMeasuring) "Stop" else "Start measurement (50 s good signal)",
                 style = MaterialTheme.typography.titleMedium
             )
         }
