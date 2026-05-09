@@ -30,9 +30,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -72,7 +74,10 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 @Composable
-fun MeasurementScreen(viewModel: MeasurementViewModel = viewModel()) {
+fun MeasurementScreen(
+    onOpenCalibrate: () -> Unit = {},
+    viewModel: MeasurementViewModel = viewModel()
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -104,7 +109,7 @@ fun MeasurementScreen(viewModel: MeasurementViewModel = viewModel()) {
         }
     ) { padding ->
         if (hasCamera) {
-            ContentLayout(state, viewModel, padding)
+            ContentLayout(state, viewModel, padding, onOpenCalibrate)
         } else {
             PermissionRequest(
                 modifier = Modifier.padding(padding),
@@ -122,7 +127,8 @@ fun MeasurementScreen(viewModel: MeasurementViewModel = viewModel()) {
 private fun ContentLayout(
     state: MeasurementViewModel.UiState,
     viewModel: MeasurementViewModel,
-    padding: androidx.compose.foundation.layout.PaddingValues
+    padding: androidx.compose.foundation.layout.PaddingValues,
+    onOpenCalibrate: () -> Unit
 ) {
     Column(
         Modifier
@@ -130,7 +136,7 @@ private fun ContentLayout(
             .padding(padding)
             .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Header(state.elapsedSec, state.isMeasuring)
+        Header(state.elapsedSec, state.isMeasuring, onOpenCalibrate)
         Spacer(Modifier.height(8.dp))
 
         CameraSection(
@@ -169,7 +175,7 @@ private fun ContentLayout(
 }
 
 @Composable
-private fun Header(elapsed: Float, isMeasuring: Boolean) {
+private fun Header(elapsed: Float, isMeasuring: Boolean, onOpenCalibrate: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(
@@ -183,6 +189,11 @@ private fun Header(elapsed: Float, isMeasuring: Boolean) {
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.labelSmall
             )
+        }
+        if (!isMeasuring) {
+            IconButton(onClick = onOpenCalibrate) {
+                Icon(Icons.Filled.Tune, contentDescription = "Calibrate", tint = Color.White)
+            }
         }
     }
 }
