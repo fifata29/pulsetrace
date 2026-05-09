@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PulseTrace</string>
+    <string name="permission_required">Camera permission is required to measure your pulse.</string>
+    <string name="grant_permission">Grant camera permission</string>
+    <string name="place_finger">Cover the rear camera and flash with your fingertip</string>
+    <string name="press_steady">Hold steady — measuring…</string>
+    <string name="start">Start measurement</string>
+    <string name="stop">Stop</string>
+    <string name="bpm">BPM</string>
+    <string name="rmssd">RMSSD</string>
+    <string name="sdnn">SDNN</string>
+    <string name="pnn50">pNN50</string>
+    <string name="signal_quality">Signal quality</string>
+    <string name="ms_unit">ms</string>
+    <string name="percent_unit">%</string>
+</resources>
