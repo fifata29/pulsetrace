@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
@@ -89,6 +90,7 @@ fun MeasurementScreen(
     onOpenCalibrate: () -> Unit = {},
     onOpenSessions: () -> Unit = {},
     onOpenPacer: () -> Unit = {},
+    onOpenRawMode: () -> Unit = {},
     viewModel: MeasurementViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -128,7 +130,7 @@ fun MeasurementScreen(
         }
     ) { padding ->
         if (hasCamera) {
-            ContentLayout(state, viewModel, padding, onOpenCalibrate, onOpenSessions, onOpenPacer)
+            ContentLayout(state, viewModel, padding, onOpenCalibrate, onOpenSessions, onOpenPacer, onOpenRawMode)
         } else {
             PermissionRequest(
                 modifier = Modifier.padding(padding),
@@ -153,7 +155,8 @@ private fun ContentLayout(
     padding: androidx.compose.foundation.layout.PaddingValues,
     onOpenCalibrate: () -> Unit,
     onOpenSessions: () -> Unit,
-    onOpenPacer: () -> Unit
+    onOpenPacer: () -> Unit,
+    onOpenRawMode: () -> Unit
 ) {
     Column(
         Modifier
@@ -161,7 +164,7 @@ private fun ContentLayout(
             .padding(padding)
             .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Header(state.phase, onOpenCalibrate, onOpenSessions, onOpenPacer)
+        Header(state.phase, onOpenCalibrate, onOpenSessions, onOpenPacer, onOpenRawMode)
         Spacer(Modifier.height(8.dp))
 
         // Inline breathing pacer — only while a measurement is active. Helps the
@@ -218,7 +221,8 @@ private fun Header(
     phase: MeasurementViewModel.Phase,
     onOpenCalibrate: () -> Unit,
     onOpenSessions: () -> Unit,
-    onOpenPacer: () -> Unit
+    onOpenPacer: () -> Unit,
+    onOpenRawMode: () -> Unit
 ) {
     val active = phase == MeasurementViewModel.Phase.Settling ||
         phase == MeasurementViewModel.Phase.Searching ||
@@ -254,6 +258,9 @@ private fun Header(
             }
             IconButton(onClick = onOpenCalibrate) {
                 Icon(Icons.Filled.Tune, contentDescription = "Calibrate", tint = Color.White)
+            }
+            IconButton(onClick = onOpenRawMode) {
+                Icon(Icons.Filled.Science, contentDescription = "Raw Mode", tint = Color.White)
             }
         }
     }

@@ -13,10 +13,11 @@ import androidx.core.view.WindowCompat
 import dk.nst.hrvmonitor.ui.BreathingPacerScreen
 import dk.nst.hrvmonitor.ui.CalibrationScreen
 import dk.nst.hrvmonitor.ui.MeasurementScreen
+import dk.nst.hrvmonitor.ui.RawModeScreen
 import dk.nst.hrvmonitor.ui.SessionsScreen
 import dk.nst.hrvmonitor.ui.theme.HrvMonitorTheme
 
-private enum class Screen { Measure, Calibrate, Sessions, Pacer }
+private enum class Screen { Measure, Calibrate, RawMode, Sessions, Pacer }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -38,9 +39,13 @@ private fun AppRoot() {
         Screen.Measure -> MeasurementScreen(
             onOpenCalibrate = { screen = Screen.Calibrate },
             onOpenSessions = { screen = Screen.Sessions },
-            onOpenPacer = { screen = Screen.Pacer }
+            onOpenPacer = { screen = Screen.Pacer },
+            onOpenRawMode = { screen = Screen.RawMode }
         )
         Screen.Calibrate -> CalibrationScreen(
+            onBack = { screen = Screen.Measure }
+        )
+        Screen.RawMode -> RawModeScreen(
             onBack = { screen = Screen.Measure }
         )
         Screen.Sessions -> SessionsScreen(
