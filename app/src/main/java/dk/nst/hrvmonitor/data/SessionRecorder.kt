@@ -4,12 +4,14 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dk.nst.hrvmonitor.ppg.HrvCalculator
+import dk.nst.hrvmonitor.ppg.QualityScorer
 import dk.nst.hrvmonitor.ppg.SignalProcessor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import java.io.BufferedWriter
@@ -121,7 +123,8 @@ class SessionRecorder(private val appContext: Context) {
         goodSec: Float = 0f,
         targetGoodSec: Float = 0f,
         timedOut: Boolean = false,
-        spectralBpm: Float = 0f
+        spectralBpm: Float = 0f,
+        qualityScore: QualityScorer.Score? = null
     ): Session? {
         val session = current ?: return null
         finishWriterIfActive()
@@ -132,7 +135,8 @@ class SessionRecorder(private val appContext: Context) {
                     w.write(buildSummaryJson(
                         session, durationSec, sampleRateHz, coverage,
                         peaks, rrMs, metrics, samplesWritten,
-                        roi, goodSec, targetGoodSec, timedOut, spectralBpm
+                        roi, goodSec, targetGoodSec, timedOut, spectralBpm,
+                        qualityScore
                     ))
                 }
                 Log.i(TAG, "Summary written to ${session.summaryJson.absolutePath}")
@@ -162,7 +166,8 @@ class SessionRecorder(private val appContext: Context) {
         goodSec: Float,
         targetGoodSec: Float,
         timedOut: Boolean,
-        spectralBpm: Float
+        spectralBpm: Float,
+        qualityScore: QualityScorer.Score?
     ): String = buildString {
         append("{\n")
         append("  \"session_id\": \"${s.dir.name}\",\n")
@@ -199,8 +204,55 @@ class SessionRecorder(private val appContext: Context) {
         append("    \"total_beats\": ${metrics.totalBeats}\n")
         append("  },\n")
         append("  \"rr_intervals_ms\": [${rrMs.joinToString(",") { "%.2f".format(Locale.US, it) }}],\n")
-        append("  \"peak_times_sec\": [${peaks.joinToString(",") { "%.4f".format(Locale.US, it.tSec) }}]\n")
-        append("}\n")
+        append("  \"peak_times_sec\": [${peaks.joinToString(",") { "%.4f".format(Locale.US, it.tSec) }}]")
+        if (qualityScore != null) {
+            append(",\n")
+            append("  \"quality\": {\n")
+            append("    \"total\": ${qualityScore.total},\n")
+            append("    \"tier\": \"${qualityScore.tier.name}\",\n")
+            append("    \"components\": {\n")
+            qualityScore.components.forEachIndexed { i, c ->
+                append("      \"${c.name.replace(" ", "_").lowercase()}\": ${c.score}")
+                if (i < qualityScore.components.lastIndex) append(",")
+                append("\n")
+            }
+            append("    }\n")
+            append("  }")
+        }
+        append("\n}\n")
+    }
+
+    /**
+     * Re-write summary.json adding (or updating) the user-supplied state tag.
+     * Loaded by hand-rolled JSON parsing to avoid depending on a JSON library here.
+     */
+    fun appendTagToSummary(sessionDir: String, tag: dk.nst.hrvmonitor.data.StateTag) {
+        ioScope.launch {
+            // The summary write happens on the same scope and may not have flushed yet.
+            // Poll up to 1 second for the file to appear.
+            val summary = File(sessionDir, "summary.json")
+            repeat(10) {
+                if (summary.exists() && summary.length() > 0) return@repeat
+                delay(100)
+            }
+            if (!summary.exists()) {
+                Log.w(TAG, "appendTag: summary.json never appeared in $sessionDir")
+                return@launch
+            }
+            try {
+                val text = summary.readText()
+                val withoutTag = text.replace(Regex(",\\s*\"tag\"\\s*:\\s*\"[^\"]*\""), "")
+                val insertPos = withoutTag.lastIndexOf("}")
+                if (insertPos < 0) return@launch
+                val updated = withoutTag.substring(0, insertPos).trimEnd().trimEnd(',') +
+                    ",\n  \"tag\": \"${tag.key}\"\n" +
+                    withoutTag.substring(insertPos)
+                summary.writeText(updated)
+                Log.i(TAG, "Tag ${tag.key} written to ${summary.name}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "tag write failed", t)
+            }
+        }
     }
 
     private fun num(v: Float?): String =

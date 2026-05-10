@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
@@ -86,6 +87,7 @@ import java.util.concurrent.Executors
 fun MeasurementScreen(
     onOpenCalibrate: () -> Unit = {},
     onOpenSessions: () -> Unit = {},
+    onOpenPacer: () -> Unit = {},
     viewModel: MeasurementViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -119,7 +121,7 @@ fun MeasurementScreen(
         }
     ) { padding ->
         if (hasCamera) {
-            ContentLayout(state, viewModel, padding, onOpenCalibrate, onOpenSessions)
+            ContentLayout(state, viewModel, padding, onOpenCalibrate, onOpenSessions, onOpenPacer)
         } else {
             PermissionRequest(
                 modifier = Modifier.padding(padding),
@@ -129,7 +131,11 @@ fun MeasurementScreen(
     }
 
     state.report?.let { report ->
-        ReportSheet(report = report, onDismiss = viewModel::dismissReport)
+        ReportSheet(
+            report = report,
+            onDismiss = viewModel::dismissReport,
+            onTagSelect = viewModel::setTagForLastSession
+        )
     }
 }
 
@@ -139,7 +145,8 @@ private fun ContentLayout(
     viewModel: MeasurementViewModel,
     padding: androidx.compose.foundation.layout.PaddingValues,
     onOpenCalibrate: () -> Unit,
-    onOpenSessions: () -> Unit
+    onOpenSessions: () -> Unit,
+    onOpenPacer: () -> Unit
 ) {
     Column(
         Modifier
@@ -147,7 +154,7 @@ private fun ContentLayout(
             .padding(padding)
             .padding(horizontal = 16.dp, vertical = 4.dp)
     ) {
-        Header(state.phase, onOpenCalibrate, onOpenSessions)
+        Header(state.phase, onOpenCalibrate, onOpenSessions, onOpenPacer)
         Spacer(Modifier.height(8.dp))
 
         CameraSection(
@@ -196,7 +203,8 @@ private fun ContentLayout(
 private fun Header(
     phase: MeasurementViewModel.Phase,
     onOpenCalibrate: () -> Unit,
-    onOpenSessions: () -> Unit
+    onOpenSessions: () -> Unit,
+    onOpenPacer: () -> Unit
 ) {
     val active = phase == MeasurementViewModel.Phase.Settling ||
         phase == MeasurementViewModel.Phase.Searching ||
@@ -224,6 +232,9 @@ private fun Header(
             )
         }
         if (!active) {
+            IconButton(onClick = onOpenPacer) {
+                Icon(Icons.Filled.Air, contentDescription = "Breathing pacer", tint = Color.White)
+            }
             IconButton(onClick = onOpenSessions) {
                 Icon(Icons.Filled.History, contentDescription = "History", tint = Color.White)
             }

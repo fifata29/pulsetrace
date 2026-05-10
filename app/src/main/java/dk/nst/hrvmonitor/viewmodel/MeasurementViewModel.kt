@@ -4,7 +4,9 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dk.nst.hrvmonitor.data.SessionRecorder
+import dk.nst.hrvmonitor.data.StateTag
 import dk.nst.hrvmonitor.ppg.HrvCalculator
+import dk.nst.hrvmonitor.ppg.QualityScorer
 import dk.nst.hrvmonitor.ppg.RoiSelector
 import dk.nst.hrvmonitor.ppg.SignalProcessor
 import dk.nst.hrvmonitor.ppg.TileGridAnalyzer
@@ -78,7 +80,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         val peaks: List<SignalProcessor.Peak>,
         val sessionPath: String?,
         val roi: RoiInfo?,
-        val spectralBpm: Float = 0f
+        val spectralBpm: Float = 0f,
+        val tag: StateTag? = null
     )
 
     private val processor = SignalProcessor(windowSeconds = 60f)
@@ -273,6 +276,14 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         _state.value = _state.value.copy(report = null, phase = Phase.Idle)
     }
 
+    /** Persist a state tag (Resting, Post-workout, etc.) to the just-recorded session. */
+    fun setTagForLastSession(tag: StateTag) {
+        val report = _state.value.report ?: return
+        val updated = report.copy(tag = tag)
+        _state.value = _state.value.copy(report = updated)
+        report.sessionPath?.let { recorder.appendTagToSummary(it, tag) }
+    }
+
     private suspend fun runRoiSelection() {
         val frames: List<TileGridAnalyzer.TileSample> = synchronized(searchBuffer) {
             searchBuffer.toList()
@@ -332,6 +343,16 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
                 acceptable = it.acceptable
             )
         }
+        val qualityScore = QualityScorer.scoreFromInputs(
+            bpm = metrics.bpm,
+            spectralBpm = snap.spectralBpm,
+            rrMs = snap.rrMs,
+            sampleRateHz = snap.sampleRateHz,
+            coverage = snap.coverage,
+            validBeats = metrics.validBeats,
+            totalBeats = metrics.totalBeats,
+            timedOut = timedOut
+        )
         val session = recorder.stop(
             durationSec = measureElapsed,
             sampleRateHz = snap.sampleRateHz,
@@ -344,7 +365,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             goodSec = goodSec,
             targetGoodSec = TARGET_GOOD_SEC,
             timedOut = timedOut,
-            spectralBpm = snap.spectralBpm
+            spectralBpm = snap.spectralBpm,
+            qualityScore = qualityScore
         )
 
         val report = Report(

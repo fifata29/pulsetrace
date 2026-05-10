@@ -38,6 +38,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dk.nst.hrvmonitor.data.StateTag
 import dk.nst.hrvmonitor.ppg.HrvCalculator
 import dk.nst.hrvmonitor.ppg.SignalProcessor
 import dk.nst.hrvmonitor.ui.components.ReportSheet
@@ -191,7 +192,8 @@ private data class SessionEntry(
     val rrMs: List<Float>,
     val peakTimesSec: List<Float>,
     val sessionPath: String,
-    val roi: MeasurementViewModel.RoiInfo?
+    val roi: MeasurementViewModel.RoiInfo?,
+    val tag: StateTag?
 ) {
     val formattedTimestamp: String
         get() {
@@ -220,7 +222,8 @@ private data class SessionEntry(
         peaks = peakTimesSec.map { SignalProcessor.Peak(it, 0f) },
         sessionPath = sessionPath,
         roi = roi,
-        spectralBpm = spectralBpm
+        spectralBpm = spectralBpm,
+        tag = tag
     )
 }
 
@@ -286,7 +289,8 @@ private fun parseSummary(file: File, dirPath: String): SessionEntry? {
             rrMs = rr,
             peakTimesSec = peaks,
             sessionPath = dirPath,
-            roi = roi
+            roi = roi,
+            tag = StateTag.fromKey(obj.optString("tag", null))
         )
     } catch (_: Throwable) {
         null
