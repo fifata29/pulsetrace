@@ -166,6 +166,8 @@ private fun ContentLayout(
             goodSec = state.goodSec,
             targetGoodSec = state.targetGoodSec,
             targetSearchSec = state.targetSearchSec,
+            targetSettleSec = state.targetSettleSec,
+            settleProgress = state.settleProgress,
             searchProgress = state.searchProgress,
             measureProgress = state.measureProgress,
             isGoodSignal = state.isGoodSignal
@@ -196,7 +198,8 @@ private fun Header(
     onOpenCalibrate: () -> Unit,
     onOpenSessions: () -> Unit
 ) {
-    val active = phase == MeasurementViewModel.Phase.Searching ||
+    val active = phase == MeasurementViewModel.Phase.Settling ||
+        phase == MeasurementViewModel.Phase.Searching ||
         phase == MeasurementViewModel.Phase.Measuring
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
@@ -207,12 +210,14 @@ private fun Header(
             )
             Text(
                 when (phase) {
+                    MeasurementViewModel.Phase.Settling ->
+                        "Settling — keep finger over lens & flash"
                     MeasurementViewModel.Phase.Searching ->
                         "Finding the pulse region — hold finger steady"
                     MeasurementViewModel.Phase.Measuring ->
                         "Measuring HRV in the highlighted region"
                     else ->
-                        "Tap Start: 10 s search + 50 s of clean recording"
+                        "Tap Start: 10 s settle + 10 s search + 50 s recording"
                 },
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.labelSmall
@@ -324,7 +329,8 @@ private fun CameraSection(
     val analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
     val cameraRef = remember { mutableStateOf<Camera?>(null) }
 
-    val active = phase == MeasurementViewModel.Phase.Searching ||
+    val active = phase == MeasurementViewModel.Phase.Settling ||
+        phase == MeasurementViewModel.Phase.Searching ||
         phase == MeasurementViewModel.Phase.Measuring
 
     Box(
@@ -339,6 +345,16 @@ private fun CameraSection(
             modifier = Modifier.fillMaxSize()
         )
         when (phase) {
+            MeasurementViewModel.Phase.Settling -> {
+                // Faint centered crosshair — no grid yet. Camera is still adjusting.
+                Canvas(Modifier.fillMaxSize()) {
+                    val cx = size.width / 2; val cy = size.height / 2
+                    val tick = minOf(size.width, size.height) * 0.10f
+                    val c = Color.White.copy(alpha = 0.28f)
+                    drawLine(c, Offset(cx - tick, cy), Offset(cx + tick, cy), strokeWidth = 2f)
+                    drawLine(c, Offset(cx, cy - tick), Offset(cx, cy + tick), strokeWidth = 2f)
+                }
+            }
             MeasurementViewModel.Phase.Searching -> {
                 Canvas(Modifier.fillMaxSize()) {
                     val gc = Color.White.copy(alpha = 0.18f)
@@ -453,7 +469,11 @@ private fun CameraSection(
 
     LaunchedEffect(phase, cameraRef.value) {
         val cam = cameraRef.value ?: return@LaunchedEffect
-        val locked = phase == MeasurementViewModel.Phase.Measuring
+        // Lock AE/AWB once Settling is over (matches the 5–10 s settle-then-lock
+        // recommendation in the smartphone-PPG calibration literature). Settling
+        // itself stays unlocked so the camera converges on the finger-on exposure.
+        val locked = phase == MeasurementViewModel.Phase.Searching ||
+            phase == MeasurementViewModel.Phase.Measuring
         try {
             val c2 = Camera2CameraControl.from(cam.cameraControl)
             c2.captureRequestOptions = CaptureRequestOptions.Builder()

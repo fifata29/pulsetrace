@@ -25,17 +25,19 @@ import kotlinx.coroutines.launch
  */
 class MeasurementViewModel(application: Application) : AndroidViewModel(application) {
 
-    enum class Phase { Idle, Searching, Measuring, Done }
+    enum class Phase { Idle, Settling, Searching, Measuring, Done }
 
     data class UiState(
         val phase: Phase = Phase.Idle,
-        val isMeasuring: Boolean = false,                // = phase ∈ {Searching, Measuring}
+        val isMeasuring: Boolean = false,                // = phase ∈ {Settling, Searching, Measuring}
         val targetGoodSec: Float = TARGET_GOOD_SEC,
         val targetSearchSec: Float = SEARCH_SEC,
+        val targetSettleSec: Float = SETTLE_SEC,
         val elapsedSec: Float = 0f,
         val goodSec: Float = 0f,                         // accumulated good time in measuring phase
-        val searchProgress: Float = 0f,                  // 0..1 in phase 1
-        val measureProgress: Float = 0f,                 // 0..1 in phase 2
+        val settleProgress: Float = 0f,                  // 0..1 settle phase
+        val searchProgress: Float = 0f,                  // 0..1 in search phase
+        val measureProgress: Float = 0f,                 // 0..1 in measuring phase
         val isGoodSignal: Boolean = false,
         val sampleRateHz: Float = 0f,
         val coverage: Float = 0f,                        // most recent coverage, 0..1
@@ -102,7 +104,16 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
 
     val analyzer = TileGridAnalyzer(GRID_COLS, GRID_ROWS) { sample ->
         nTilesTotal = sample.tilesR.size
+        // Always estimate coverage from a centered tile so the UI can give feedback
+        // during Settling — we just don't analyse anything else.
+        val centerIdx = (GRID_ROWS / 2) * GRID_COLS + (GRID_COLS / 2)
+        val centerY = sample.tilesY.getOrNull(centerIdx) ?: 0f
+        latestCoverage = (centerY / 200f).coerceIn(0f, 1f)
         when (phaseRef) {
+            Phase.Settling -> {
+                // Camera + torch are on, AE/AWB unlocked, finger placement happens here.
+                // Intentionally no buffering or analysis — settle the optics first.
+            }
             Phase.Searching -> {
                 // Buffer full-grid frames for offline tile selection. Bounded.
                 synchronized(searchBuffer) {
@@ -161,19 +172,39 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         latestCoverage = 0f
         roiTiles = IntArray(0)
         synchronized(searchBuffer) { searchBuffer.clear() }
-        phaseRef = Phase.Searching
+        phaseRef = Phase.Settling
 
         _state.value = UiState(
-            phase = Phase.Searching,
+            phase = Phase.Settling,
             isMeasuring = true
         )
 
         refreshJob = viewModelScope.launch(Dispatchers.Default) {
+            // ---- Phase 0: Settle (camera + AE/AWB converge, finger placement) ----
+            val settleStart = System.nanoTime()
+            while (phaseRef == Phase.Settling) {
+                val elapsed = (System.nanoTime() - settleStart) / 1e9f
+                _state.value = _state.value.copy(
+                    elapsedSec = (System.nanoTime() - startNs) / 1e9f,
+                    settleProgress = (elapsed / SETTLE_SEC).coerceIn(0f, 1f),
+                    coverage = latestCoverage
+                )
+                if (elapsed >= SETTLE_SEC) {
+                    phaseRef = Phase.Searching
+                    _state.value = _state.value.copy(
+                        phase = Phase.Searching,
+                        settleProgress = 1f
+                    )
+                    break
+                }
+                delay(REFRESH_MS)
+            }
+            val searchStart = System.nanoTime()
             // ---- Phase 1: Search ----
             while (phaseRef == Phase.Searching) {
-                val elapsed = (System.nanoTime() - startNs) / 1e9f
+                val elapsed = (System.nanoTime() - searchStart) / 1e9f
                 _state.value = _state.value.copy(
-                    elapsedSec = elapsed,
+                    elapsedSec = (System.nanoTime() - startNs) / 1e9f,
                     searchProgress = (elapsed / SEARCH_SEC).coerceIn(0f, 1f),
                     coverage = latestCoverage
                 )
@@ -223,7 +254,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
 
     fun stop() {
         when (phaseRef) {
-            Phase.Searching -> {
+            Phase.Settling, Phase.Searching -> {
                 phaseRef = Phase.Idle
                 refreshJob?.cancel()
                 refreshJob = null
@@ -355,6 +386,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     companion object {
+        const val SETTLE_SEC = 10f
         const val SEARCH_SEC = 10f
         const val TARGET_GOOD_SEC = 50f
         private const val MAX_MEASURE_WALL_SEC = 180f

@@ -3,7 +3,9 @@ package dk.nst.hrvmonitor.ui
 import android.hardware.camera2.CaptureRequest
 import android.util.Range
 import android.util.Size as AndroidSize
+import android.hardware.camera2.CameraCharacteristics
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
@@ -94,6 +96,7 @@ fun CalibrationScreen(
     }
     val analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
     var camera by remember { mutableStateOf<Camera?>(null) }
+    var cameraInfoLine by remember { mutableStateOf("") }
 
     // Bind camera + torch + permanent analyzer once when entering this screen.
     LaunchedEffect(Unit) {
@@ -132,6 +135,7 @@ fun CalibrationScreen(
                 )
                 cam.cameraControl.enableTorch(true)
                 camera = cam
+                cameraInfoLine = describeCamera(cam)
             } catch (_: Exception) {}
         }, ContextCompat.getMainExecutor(context))
     }
@@ -216,6 +220,14 @@ fun CalibrationScreen(
             Spacer(Modifier.height(10.dp))
 
             StatusRow(state)
+            if (cameraInfoLine.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    cameraInfoLine,
+                    color = OnSurfaceMuted,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
             Spacer(Modifier.height(10.dp))
 
             ProgressBlock(state)
@@ -379,4 +391,32 @@ private fun formatTime(sec: Float): String {
     val m = s / 60
     val r = s % 60
     return "%d:%02d".format(m, r)
+}
+
+@OptIn(ExperimentalCamera2Interop::class)
+private fun describeCamera(cam: Camera): String {
+    return try {
+        val info = Camera2CameraInfo.from(cam.cameraInfo)
+        val id = info.cameraId
+        val focal = info.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+            ?.firstOrNull()
+        val zoom = cam.cameraInfo.intrinsicZoomRatio
+        val facing = info.getCameraCharacteristic(CameraCharacteristics.LENS_FACING)
+        val facingStr = when (facing) {
+            CameraCharacteristics.LENS_FACING_BACK -> "BACK"
+            CameraCharacteristics.LENS_FACING_FRONT -> "FRONT"
+            else -> "?"
+        }
+        val lensHint = when {
+            zoom == null -> ""
+            zoom < 0.7f -> " — ultrawide"
+            zoom < 1.4f -> " — main"
+            else -> " — telephoto"
+        }
+        val zoomStr = zoom?.let { "%.2f×".format(it) } ?: "?"
+        val focalStr = focal?.let { "%.2f mm".format(it) } ?: "?"
+        "Camera $facingStr id=$id · zoom $zoomStr · focal $focalStr$lensHint"
+    } catch (_: Throwable) {
+        "Camera info unavailable"
+    }
 }

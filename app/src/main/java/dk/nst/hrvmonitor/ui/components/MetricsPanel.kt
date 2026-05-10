@@ -48,6 +48,8 @@ fun BpmHero(
     goodSec: Float,
     targetGoodSec: Float,
     targetSearchSec: Float,
+    targetSettleSec: Float,
+    settleProgress: Float,
     searchProgress: Float,
     measureProgress: Float,
     isGoodSignal: Boolean,
@@ -58,11 +60,17 @@ fun BpmHero(
         animationSpec = tween(durationMillis = 400),
         label = "bpm"
     )
+    val isSettling = phase == MeasurementViewModel.Phase.Settling
     val isSearching = phase == MeasurementViewModel.Phase.Searching
     val isMeasuring = phase == MeasurementViewModel.Phase.Measuring
-    val isActive = isSearching || isMeasuring
-    val progress = if (isSearching) searchProgress else measureProgress
+    val isActive = isSettling || isSearching || isMeasuring
+    val progress = when {
+        isSettling -> settleProgress
+        isSearching -> searchProgress
+        else -> measureProgress
+    }
     val barColor = when {
+        isSettling -> OnSurfaceMuted
         isSearching -> Accent
         isMeasuring && !isGoodSignal -> Warn
         else -> Pulse
@@ -85,6 +93,7 @@ fun BpmHero(
                     .background(
                         when {
                             !isActive -> OnSurfaceMuted
+                            isSettling -> OnSurfaceMuted
                             isSearching -> Accent
                             isGoodSignal -> Pulse
                             else -> Warn
@@ -95,11 +104,13 @@ fun BpmHero(
             Text(
                 when {
                     !isActive -> "Idle"
+                    isSettling -> "Settling — hold finger steady"
                     isSearching -> "Searching pulse region"
                     isGoodSignal -> "Live"
                     else -> "Paused"
                 },
                 color = when {
+                    isSettling -> OnSurfaceMuted
                     isSearching -> Accent
                     isMeasuring && !isGoodSignal -> Warn
                     else -> OnSurfaceMuted
@@ -108,8 +119,14 @@ fun BpmHero(
             )
             Spacer(Modifier.weight(1f))
             Text(
-                if (isSearching) "${formatTime(elapsedSec)} / ${formatTime(targetSearchSec)}"
-                else "${formatTime(goodSec)} / ${formatTime(targetGoodSec)} good",
+                when {
+                    isSettling ->
+                        "${formatTime((targetSettleSec - settleProgress * targetSettleSec).coerceAtLeast(0f))} to start"
+                    isSearching ->
+                        "${formatTime((targetSearchSec - searchProgress * targetSearchSec).coerceAtLeast(0f))} to lock ROI"
+                    else ->
+                        "${formatTime(goodSec)} / ${formatTime(targetGoodSec)} good"
+                },
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.labelLarge
             )
@@ -150,7 +167,14 @@ fun BpmHero(
             color = barColor,
             trackColor = Color.White.copy(alpha = 0.10f)
         )
-        if (isSearching) {
+        if (isSettling) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Letting the camera adjust to your finger before locking exposure.",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        } else if (isSearching) {
             Spacer(Modifier.height(4.dp))
             Text(
                 "Analysing the frame to find the strongest pulse region…",
