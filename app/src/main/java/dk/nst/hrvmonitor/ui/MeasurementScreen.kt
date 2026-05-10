@@ -183,7 +183,11 @@ private fun ContentLayout(
             roi = state.roi,
             gridCols = state.gridCols,
             gridRows = state.gridRows,
-            analyzer = viewModel.analyzer
+            analyzer = viewModel.analyzer,
+            tileAc = state.tileAc,
+            bestTileRow = state.bestTileRow,
+            bestTileCol = state.bestTileCol,
+            scoutChannelIsGreen = state.site == MeasurementViewModel.Site.Forearm
         )
         Spacer(Modifier.height(8.dp))
 
@@ -396,6 +400,72 @@ private fun PermissionRequest(onRequest: () -> Unit, modifier: Modifier = Modifi
  *  - Phase 2: the chosen ROI bounding box drawn over the preview.
  */
 @OptIn(ExperimentalCamera2Interop::class)
+/**
+ * Translucent per-tile heat-map driven by rolling-2 s AC of the active channel.
+ * Bright = strong pulse signal in that tile right now. Lets the user slide the
+ * phone laterally during Settle/Search to find the optimal lateral position
+ * before the ROI gets locked.
+ */
+@Composable
+private fun ScoutHeatmap(
+    tileAc: FloatArray,
+    gridCols: Int,
+    gridRows: Int,
+    useGreenPalette: Boolean
+) {
+    if (tileAc.isEmpty()) return
+    var maxAc = 0f
+    for (v in tileAc) if (v > maxAc) maxAc = v
+    if (maxAc < 0.05f) return
+    Canvas(Modifier.fillMaxSize()) {
+        val tileW = size.width / gridCols
+        val tileH = size.height / gridRows
+        for (r in 0 until gridRows) {
+            for (c in 0 until gridCols) {
+                val v = (tileAc[r * gridCols + c] / maxAc).coerceIn(0f, 1f)
+                if (v < 0.15f) continue
+                val red: Float; val grn: Float; val blu: Float
+                if (useGreenPalette) {
+                    red = (v * v).coerceIn(0f, 1f)
+                    grn = (0.4f + 0.6f * v).coerceIn(0f, 1f)
+                    blu = (0.5f - 0.5f * v).coerceIn(0f, 1f)
+                } else {
+                    red = (0.5f + 0.5f * v).coerceIn(0f, 1f)
+                    grn = (v * v * 0.7f).coerceIn(0f, 1f)
+                    blu = (0.4f - 0.4f * v).coerceIn(0f, 1f)
+                }
+                val alpha = (0.05f + v * 0.45f).coerceIn(0f, 0.55f)
+                drawRect(
+                    color = Color(red, grn, blu, alpha),
+                    topLeft = Offset(c * tileW, r * tileH),
+                    size = Size(tileW, tileH)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScoutBestTileMarker(
+    bestRow: Int,
+    bestCol: Int,
+    gridCols: Int,
+    gridRows: Int
+) {
+    if (bestRow < 0 || bestCol < 0) return
+    Canvas(Modifier.fillMaxSize()) {
+        val tileW = size.width / gridCols
+        val tileH = size.height / gridRows
+        val stroke = 3f
+        drawRect(
+            color = Color.White,
+            topLeft = Offset(bestCol * tileW + stroke / 2, bestRow * tileH + stroke / 2),
+            size = Size(tileW - stroke, tileH - stroke),
+            style = Stroke(width = stroke)
+        )
+    }
+}
+
 @Composable
 private fun CameraSection(
     phase: MeasurementViewModel.Phase,
@@ -403,6 +473,10 @@ private fun CameraSection(
     gridCols: Int,
     gridRows: Int,
     analyzer: ImageAnalysis.Analyzer,
+    tileAc: FloatArray,
+    bestTileRow: Int,
+    bestTileCol: Int,
+    scoutChannelIsGreen: Boolean,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -434,18 +508,31 @@ private fun CameraSection(
         )
         when (phase) {
             MeasurementViewModel.Phase.Settling -> {
-                // Faint centered crosshair — no grid yet. Camera is still adjusting.
-                Canvas(Modifier.fillMaxSize()) {
-                    val cx = size.width / 2; val cy = size.height / 2
-                    val tick = minOf(size.width, size.height) * 0.10f
-                    val c = Color.White.copy(alpha = 0.28f)
-                    drawLine(c, Offset(cx - tick, cy), Offset(cx + tick, cy), strokeWidth = 2f)
-                    drawLine(c, Offset(cx, cy - tick), Offset(cx, cy + tick), strokeWidth = 2f)
-                }
+                // Live position-scout overlay so the user can slide the phone
+                // laterally and watch the bright region track the actual pulse
+                // signal BEFORE ROI gets locked. Bright = strong pulse here.
+                ScoutHeatmap(
+                    tileAc = tileAc,
+                    gridCols = gridCols,
+                    gridRows = gridRows,
+                    useGreenPalette = scoutChannelIsGreen
+                )
+                ScoutBestTileMarker(
+                    bestRow = bestTileRow,
+                    bestCol = bestTileCol,
+                    gridCols = gridCols,
+                    gridRows = gridRows
+                )
             }
             MeasurementViewModel.Phase.Searching -> {
+                ScoutHeatmap(
+                    tileAc = tileAc,
+                    gridCols = gridCols,
+                    gridRows = gridRows,
+                    useGreenPalette = scoutChannelIsGreen
+                )
                 Canvas(Modifier.fillMaxSize()) {
-                    val gc = Color.White.copy(alpha = 0.18f)
+                    val gc = Color.White.copy(alpha = 0.12f)
                     for (i in 1 until gridCols) {
                         val x = size.width * i / gridCols
                         drawLine(gc, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
@@ -455,6 +542,12 @@ private fun CameraSection(
                         drawLine(gc, Offset(0f, y), Offset(size.width, y), strokeWidth = 1f)
                     }
                 }
+                ScoutBestTileMarker(
+                    bestRow = bestTileRow,
+                    bestCol = bestTileCol,
+                    gridCols = gridCols,
+                    gridRows = gridRows
+                )
             }
             MeasurementViewModel.Phase.Measuring -> {
                 if (roi != null) {

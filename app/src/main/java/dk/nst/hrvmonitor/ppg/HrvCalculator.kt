@@ -29,7 +29,15 @@ object HrvCalculator {
             return Metrics(null, null, null, null, 0, rrMs.size)
         }
 
-        val nn = filterOutliers(rrMs)
+        // Build an accept-mask aligned with the original RR sequence so that
+        // RMSSD / pNN50 (which are *successive-pair* metrics) only count pairs
+        // where BOTH RRs are accepted AND are consecutive in time. Previous
+        // implementation flattened the filtered list and computed successive
+        // diffs on it, which counted spurious "diffs" across rejected gaps —
+        // a 900 ms → (rejected) → 700 ms pair became a 200 ms diff even though
+        // a real beat in between would have made the diffs 50 + 50 ms.
+        val accepted = acceptanceMask(rrMs)
+        val nn = rrMs.zip(accepted).filter { it.second }.map { it.first }
         if (nn.size < 3) {
             return Metrics(null, null, null, null, nn.size, rrMs.size)
         }
@@ -43,15 +51,20 @@ object HrvCalculator {
         for (v in nn) varSum += (v - mean) * (v - mean)
         val sdnn = sqrt(varSum / nn.size)
 
-        var sqDiffSum = 0f
+        // Successive-pair metrics: only count adjacent ACCEPTED RRs in the
+        // original sequence. Pairs spanning a rejected RR are skipped.
+        var sqDiffSum = 0.0
         var nn50 = 0
-        for (i in 1 until nn.size) {
-            val d = nn[i] - nn[i - 1]
-            sqDiffSum += d * d
+        var pairCount = 0
+        for (i in 1 until rrMs.size) {
+            if (!accepted[i] || !accepted[i - 1]) continue
+            val d = rrMs[i] - rrMs[i - 1]
+            sqDiffSum += d.toDouble() * d.toDouble()
             if (abs(d) > 50f) nn50++
+            pairCount++
         }
-        val rmssd = sqrt(sqDiffSum / (nn.size - 1))
-        val pnn50 = 100f * nn50 / (nn.size - 1)
+        val rmssd = if (pairCount > 0) sqrt(sqDiffSum / pairCount).toFloat() else null
+        val pnn50 = if (pairCount > 0) 100f * nn50 / pairCount else null
 
         return Metrics(
             bpm = bpm,
@@ -64,27 +77,33 @@ object HrvCalculator {
     }
 
     /**
-     * Median-based outlier rejection. The previous sequential filter latched onto the
-     * first in-range RR; if that was a filter-ringing artifact, every real beat
-     * downstream got rejected and BPM ended up at 180+ from a tiny noise cluster.
-     *
-     * Now: compute the median of all physiologically-plausible RRs (300–2000 ms) and
-     * reject anything more than [REJECT_FRACTION] away from it. One refinement pass
-     * tightens the median once obvious outliers are gone.
+     * Returns a per-RR boolean mask: true = accept, false = reject. Median-based
+     * rejection: an RR is accepted if it's in the physiological 300–2000 ms band
+     * AND within [REJECT_FRACTION] of the median of the in-range RRs. One
+     * refinement pass tightens the median once obvious outliers are gone.
      */
-    private fun filterOutliers(rrMs: List<Float>): List<Float> {
-        val inRange = rrMs.filter { it in 300f..2000f }
-        if (inRange.size < 3) return inRange
+    private fun acceptanceMask(rrMs: List<Float>): BooleanArray {
+        val mask = BooleanArray(rrMs.size)
+        val inRangeIdx = rrMs.indices.filter { rrMs[it] in 300f..2000f }
+        if (inRangeIdx.size < 3) {
+            for (i in inRangeIdx) mask[i] = true
+            return mask
+        }
 
-        var ref = inRange.sorted()[inRange.size / 2]
-        var accepted = inRange.filter { kotlin.math.abs(it - ref) / ref <= REJECT_FRACTION }
-        if (accepted.size < 3) return accepted
-
-        // Refine: recompute median on the cleaned set, re-apply the same threshold.
-        ref = accepted.sorted()[accepted.size / 2]
-        accepted = inRange.filter { kotlin.math.abs(it - ref) / ref <= REJECT_FRACTION }
-        return accepted
+        val inRange = inRangeIdx.map { rrMs[it] }.sorted()
+        var ref = inRange[inRange.size / 2]
+        var keptIdx = inRangeIdx.filter { abs(rrMs[it] - ref) / ref <= REJECT_FRACTION }
+        if (keptIdx.size >= 3) {
+            val keptSorted = keptIdx.map { rrMs[it] }.sorted()
+            ref = keptSorted[keptSorted.size / 2]
+            keptIdx = inRangeIdx.filter { abs(rrMs[it] - ref) / ref <= REJECT_FRACTION }
+        }
+        for (i in keptIdx) mask[i] = true
+        return mask
     }
 
-    private const val REJECT_FRACTION = 0.25f
+    // Tightened from 0.25 → 0.20. At 0.25 we kept RRs up to ±25% from median;
+    // recent forearm sessions had genuine RRs ~900 ms but mis-detected pairs at
+    // 700 ms and 1100 ms (each ±22 %) which slipped through and inflated RMSSD.
+    private const val REJECT_FRACTION = 0.20f
 }

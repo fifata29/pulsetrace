@@ -156,23 +156,27 @@ object PulseMorphology {
         val crestTimeMs = if (fid.systolicPeak > fid.foot)
             (avgTime[fid.systolicPeak] - avgTime[fid.foot]) * 1000f else null
 
-        val ri = if (fid.diastolicPeak > fid.systolicPeak && sysAmp > 1e-6f) {
+        // RI / AIx / SI all require a CONFIDENT dicrotic notch. Without one, any
+        // value we compute is fabricated from noise (we've seen RI = -13 % and
+        // AIx = 113 % on palm where there's anatomically no notch). Return null
+        // rather than mislead the user.
+        val ri = if (fid.notchConfident &&
+                fid.diastolicPeak > fid.systolicPeak && sysAmp > 1e-6f) {
             val diaAmp = avg[fid.diastolicPeak] - avg[fid.foot]
             val v = (100f * diaAmp / sysAmp)
-            // Real RI is typically 30–80 %. Anything > 100 % means we've mis-located peaks.
             if (v in 5f..120f) v else null
         } else null
 
-        val aix = if (fid.dicroticNotch in (fid.systolicPeak + 1) until fid.diastolicPeak && sysAmp > 1e-6f) {
+        val aix = if (fid.notchConfident &&
+                fid.dicroticNotch in (fid.systolicPeak + 1) until fid.diastolicPeak &&
+                sysAmp > 1e-6f) {
             val p1 = avg[fid.systolicPeak] - avg[fid.foot]
             val p2 = avg[fid.diastolicPeak] - avg[fid.foot]
             val v = (100f * (p2 - p1) / p1)
-            // AIx is typically -30 %..+30 %; clamp anything beyond as an indication of
-            // failed fiducial detection.
             if (v in -50f..50f) v else null
         } else null
 
-        val si = if (fid.diastolicPeak > fid.systolicPeak) {
+        val si = if (fid.notchConfident && fid.diastolicPeak > fid.systolicPeak) {
             val dt = (avgTime[fid.diastolicPeak] - avgTime[fid.systolicPeak]).coerceAtLeast(1e-3f)
             1f / dt
         } else null
@@ -246,7 +250,10 @@ object PulseMorphology {
         val foot: Int,
         val systolicPeak: Int,
         val dicroticNotch: Int,
-        val diastolicPeak: Int
+        val diastolicPeak: Int,
+        // True only when the notch is a real prominent feature, not a manufactured
+        // fallback. Downstream metrics (RI, AIx, SI) must skip when this is false.
+        val notchConfident: Boolean
     )
 
     /**
@@ -255,7 +262,10 @@ object PulseMorphology {
      *
      * The averaged beat is aligned at the foot (idx 0). The systolic peak is the
      * **global** maximum of the beat; the dicrotic notch sits on the descending
-     * limb after it.
+     * limb after it. The notch is only reported as "confident" if its 2nd-derivative
+     * prominence stands out above the d² noise floor by at least [D2_PROMINENCE_K]
+     * standard deviations — otherwise downstream RI/AIx are returned as null
+     * rather than computed on a fabricated fiducial.
      */
     private fun locateFiducials(beat: FloatArray): Fiducials {
         val n = beat.size
@@ -264,18 +274,27 @@ object PulseMorphology {
         var sysIdx = 0; var sysVal = Float.NEGATIVE_INFINITY
         for (i in 0 until n) if (beat[i] > sysVal) { sysVal = beat[i]; sysIdx = i }
 
-        // Foot: lowest point in the first 15 % of the beat (we already aligned roughly,
-        // but sub-sample minor refinement helps).
+        // Foot: lowest point in the first 15 % of the beat.
         val footEnd = (n * 0.15f).toInt().coerceAtLeast(1)
         var footIdx = 0; var footVal = beat[0]
         for (i in 0 until footEnd) if (beat[i] < footVal) { footVal = beat[i]; footIdx = i }
 
-        // Search dicrotic notch on the descending limb. Use the 2nd derivative —
-        // the strongest positive peak after sysIdx is the notch.
-        val searchStart = (sysIdx + (n * 0.06f).toInt()).coerceAtMost(n - 4)
-        val searchEnd = (n - (n * 0.05f).toInt()).coerceAtLeast(searchStart + 4)
+        // d² across the whole beat.
         val d2 = FloatArray(n)
         for (i in 1 until n - 1) d2[i] = beat[i + 1] - 2f * beat[i] + beat[i - 1]
+
+        // Noise floor for d² in the search region: std of d² outside the immediate
+        // foot/sys area.
+        val searchStart = (sysIdx + (n * 0.06f).toInt()).coerceAtMost(n - 4)
+        val searchEnd = (n - (n * 0.05f).toInt()).coerceAtLeast(searchStart + 4)
+        var d2Sum = 0.0; var d2SumSq = 0.0; var d2Count = 0
+        for (i in searchStart until searchEnd) {
+            d2Sum += d2[i]; d2SumSq += d2[i].toDouble() * d2[i].toDouble(); d2Count++
+        }
+        val d2Std = if (d2Count > 1) {
+            val m = d2Sum / d2Count
+            kotlin.math.sqrt((d2SumSq / d2Count - m * m).coerceAtLeast(0.0)).toFloat()
+        } else 0f
 
         var notchIdx = -1; var bestProm = Float.NEGATIVE_INFINITY
         for (i in searchStart + 1 until searchEnd - 1) {
@@ -283,17 +302,19 @@ object PulseMorphology {
                 if (d2[i] > bestProm) { bestProm = d2[i]; notchIdx = i }
             }
         }
+        val notchConfident = notchIdx >= 0 && bestProm > D2_PROMINENCE_K * d2Std
         if (notchIdx < 0) notchIdx = (sysIdx + (n - sysIdx) / 3).coerceIn(searchStart, searchEnd - 1)
 
         // Diastolic peak: local max strictly after the notch.
         var diaIdx = notchIdx + 1
         var diaVal = beat[diaIdx.coerceAtMost(n - 1)]
         for (i in notchIdx + 1 until searchEnd) if (beat[i] > diaVal) { diaVal = beat[i]; diaIdx = i }
-        // If diastolic ended up before the notch (search collapsed), null it out.
         if (diaIdx <= notchIdx) diaIdx = notchIdx
 
-        return Fiducials(footIdx, sysIdx, notchIdx, diaIdx)
+        return Fiducials(footIdx, sysIdx, notchIdx, diaIdx, notchConfident)
     }
+
+    private const val D2_PROMINENCE_K = 2.0f
 
     private fun computeAgi(beat: FloatArray, fsAvgBeat: Float): Pair<Float?, FloatArray?> {
         val n = beat.size

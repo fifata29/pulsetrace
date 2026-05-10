@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.sqrt
 
 /**
  * Two-phase measurement:
@@ -56,7 +57,14 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         val gridCols: Int = GRID_COLS,
         val gridRows: Int = GRID_ROWS,
         val roi: RoiInfo? = null,
-        val report: Report? = null
+        val report: Report? = null,
+        // Position-scout overlay during Settle + Search phases. Per-tile rolling
+        // AC amplitude (last ~2 s) of the active channel (R for fingertip, G for
+        // forearm). Lets the user visually find the lateral sweet-spot before
+        // the ROI gets locked.
+        val tileAc: FloatArray = FloatArray(GRID_COLS * GRID_ROWS),
+        val bestTileRow: Int = -1,
+        val bestTileCol: Int = -1
     )
 
     /** Bounding box (inclusive) of selected tiles, plus diagnostic info from selection. */
@@ -112,6 +120,13 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
 
     private val searchBuffer = ArrayDeque<TileGridAnalyzer.TileSample>()
 
+    // Per-tile ring buffer of the active channel (R or G) for the live position-
+    // scout overlay during Settle + Search. 192 × 128 floats = ~96 KB.
+    private val scoutRing: Array<FloatArray> =
+        Array(GRID_COLS * GRID_ROWS) { FloatArray(SCOUT_RING_SIZE) }
+    @Volatile private var scoutRingWritten: Long = 0L
+    @Volatile private var scoutChannelIsGreen: Boolean = false
+
     val analyzer = TileGridAnalyzer(GRID_COLS, GRID_ROWS) { sample ->
         nTilesTotal = sample.tilesR.size
         // Always estimate coverage from a centered tile so the UI can give feedback
@@ -121,15 +136,19 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         latestCoverage = (centerY / 200f).coerceIn(0f, 1f)
         when (phaseRef) {
             Phase.Settling -> {
-                // Camera + torch are on, AE/AWB unlocked, finger placement happens here.
-                // Intentionally no buffering or analysis — settle the optics first.
+                // Camera + torch are on, AE/AWB unlocked. We populate the live
+                // position-scout ring so the user can slide laterally and watch
+                // the heat-map find the pulse region BEFORE the ROI gets locked.
+                writeScoutRing(sample)
             }
             Phase.Searching -> {
-                // Buffer full-grid frames for offline tile selection. Bounded.
+                // Buffer full-grid frames for offline tile selection AND keep the
+                // live scout going so the overlay stays responsive.
                 synchronized(searchBuffer) {
                     searchBuffer.addLast(sample)
                     if (searchBuffer.size > SEARCH_BUFFER_MAX) searchBuffer.removeFirst()
                 }
+                writeScoutRing(sample)
             }
             Phase.Measuring -> {
                 val tiles = roiTiles
@@ -179,6 +198,43 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         if (_state.value.isMeasuring) return
         _state.value = _state.value.copy(site = site)
         processor.setUseGreen(site == Site.Forearm)
+        scoutChannelIsGreen = site == Site.Forearm
+    }
+
+    private fun writeScoutRing(sample: TileGridAnalyzer.TileSample) {
+        val n = sample.tilesR.size
+        val slot = (scoutRingWritten % SCOUT_RING_SIZE).toInt()
+        val src = if (scoutChannelIsGreen) sample.tilesG else sample.tilesR
+        for (i in 0 until n) scoutRing[i][slot] = src[i]
+        scoutRingWritten++
+    }
+
+    private fun computeScoutTileAc(): Triple<FloatArray, Int, Int> {
+        val nTiles = GRID_COLS * GRID_ROWS
+        val out = FloatArray(nTiles)
+        val have = if (scoutRingWritten >= SCOUT_RING_SIZE.toLong())
+            SCOUT_RING_SIZE else scoutRingWritten.toInt()
+        if (have < 8) return Triple(out, -1, -1)
+        var bestIdx = -1
+        var bestAc = 0f
+        for (i in 0 until nTiles) {
+            val ring = scoutRing[i]
+            var sum = 0.0
+            var sumSq = 0.0
+            for (j in 0 until have) {
+                val v = ring[j]
+                sum += v
+                sumSq += v * v
+            }
+            val mean = sum / have
+            val variance = (sumSq / have - mean * mean).coerceAtLeast(0.0)
+            val ac = sqrt(variance).toFloat()
+            out[i] = ac
+            if (ac > bestAc) { bestAc = ac; bestIdx = i }
+        }
+        val bestRow = if (bestIdx >= 0) bestIdx / GRID_COLS else -1
+        val bestCol = if (bestIdx >= 0) bestIdx % GRID_COLS else -1
+        return Triple(out, bestRow, bestCol)
     }
 
     fun start() {
@@ -186,6 +242,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         val currentSite = _state.value.site
         processor.reset()
         processor.setUseGreen(currentSite == Site.Forearm)
+        scoutChannelIsGreen = currentSite == Site.Forearm
+        scoutRingWritten = 0L
         startNs = System.nanoTime()
         measureStartNs = 0L
         goodNs = 0L
@@ -206,10 +264,14 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             val settleStart = System.nanoTime()
             while (phaseRef == Phase.Settling) {
                 val elapsed = (System.nanoTime() - settleStart) / 1e9f
+                val (acArr, bRow, bCol) = computeScoutTileAc()
                 _state.value = _state.value.copy(
                     elapsedSec = (System.nanoTime() - startNs) / 1e9f,
                     settleProgress = (elapsed / SETTLE_SEC).coerceIn(0f, 1f),
-                    coverage = latestCoverage
+                    coverage = latestCoverage,
+                    tileAc = acArr,
+                    bestTileRow = bRow,
+                    bestTileCol = bCol
                 )
                 if (elapsed >= SETTLE_SEC) {
                     phaseRef = Phase.Searching
@@ -225,10 +287,14 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             // ---- Phase 1: Search ----
             while (phaseRef == Phase.Searching) {
                 val elapsed = (System.nanoTime() - searchStart) / 1e9f
+                val (acArr, bRow, bCol) = computeScoutTileAc()
                 _state.value = _state.value.copy(
                     elapsedSec = (System.nanoTime() - startNs) / 1e9f,
                     searchProgress = (elapsed / SEARCH_SEC).coerceIn(0f, 1f),
-                    coverage = latestCoverage
+                    coverage = latestCoverage,
+                    tileAc = acArr,
+                    bestTileRow = bRow,
+                    bestTileCol = bCol
                 )
                 if (elapsed >= SEARCH_SEC) {
                     runRoiSelection()
@@ -464,5 +530,6 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         private const val REFRESH_MS = 100L
         private const val ROI_TOP_K = 14
         private const val SEARCH_BUFFER_MAX = 360       // cap memory if fs spikes (12 s at 30 Hz)
+        private const val SCOUT_RING_SIZE = 128         // ~2 s @ 60 Hz, ring per tile for live AC
     }
 }
