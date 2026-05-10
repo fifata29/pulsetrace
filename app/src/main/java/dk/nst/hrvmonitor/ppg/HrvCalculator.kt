@@ -36,8 +36,9 @@ object HrvCalculator {
         // diffs on it, which counted spurious "diffs" across rejected gaps —
         // a 900 ms → (rejected) → 700 ms pair became a 200 ms diff even though
         // a real beat in between would have made the diffs 50 + 50 ms.
-        val accepted = acceptanceMask(rrMs)
-        val nn = rrMs.zip(accepted).filter { it.second }.map { it.first }
+        val acceptMask = acceptanceMask(rrMs)
+        val nn = ArrayList<Float>(rrMs.size)
+        for (i in rrMs.indices) if (acceptMask[i]) nn.add(rrMs[i])
         if (nn.size < 3) {
             return Metrics(null, null, null, null, nn.size, rrMs.size)
         }
@@ -46,7 +47,9 @@ object HrvCalculator {
         val median = sorted[sorted.size / 2]
         val bpm = 60_000f / median
 
-        val mean = nn.average().toFloat()
+        var meanSum = 0.0
+        for (v in nn) meanSum += v
+        val mean = (meanSum / nn.size).toFloat()
         var varSum = 0f
         for (v in nn) varSum += (v - mean) * (v - mean)
         val sdnn = sqrt(varSum / nn.size)
@@ -57,14 +60,14 @@ object HrvCalculator {
         var nn50 = 0
         var pairCount = 0
         for (i in 1 until rrMs.size) {
-            if (!accepted[i] || !accepted[i - 1]) continue
+            if (!acceptMask[i] || !acceptMask[i - 1]) continue
             val d = rrMs[i] - rrMs[i - 1]
             sqDiffSum += d.toDouble() * d.toDouble()
             if (abs(d) > 50f) nn50++
             pairCount++
         }
-        val rmssd = if (pairCount > 0) sqrt(sqDiffSum / pairCount).toFloat() else null
-        val pnn50 = if (pairCount > 0) 100f * nn50 / pairCount else null
+        val rmssd: Float? = if (pairCount > 0) sqrt(sqDiffSum / pairCount).toFloat() else null
+        val pnn50: Float? = if (pairCount > 0) 100f * nn50.toFloat() / pairCount.toFloat() else null
 
         return Metrics(
             bpm = bpm,

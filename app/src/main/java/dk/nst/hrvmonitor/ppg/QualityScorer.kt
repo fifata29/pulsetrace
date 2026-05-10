@@ -45,7 +45,8 @@ object QualityScorer {
         coverage = report.coverage,
         validBeats = report.metrics.validBeats,
         totalBeats = report.metrics.totalBeats,
-        timedOut = report.timedOut
+        timedOut = report.timedOut,
+        perfusionIndex = 0f
     )
 
     fun scoreFromInputs(
@@ -56,26 +57,32 @@ object QualityScorer {
         coverage: Float,
         validBeats: Int,
         totalBeats: Int,
-        timedOut: Boolean
+        timedOut: Boolean,
+        // AC / DC, expressed as a percentage. The hardware-derived perfusion
+        // index from any clinical pulse oximeter — the strongest single SQI
+        // in the literature (Elgendi 2016, Bioengineering). For our pipeline:
+        // AC = std of the bandpassed signal, DC = mean of the raw resampled
+        // channel value over the same window.
+        perfusionIndex: Float = 0f
     ): Score {
         val parts = mutableListOf<Component>()
 
-        // 1) BPM agreement (30) ---------------------------------------------
+        // 1) BPM agreement (25) ---------------------------------------------
         val (agreementScore, agreementNote) = if (bpm != null && spectralBpm > 1f) {
             val rel = abs(bpm - spectralBpm) / bpm
-            val s = (30f * (1f - (rel / 0.30f).coerceIn(0f, 1f))).roundToInt()
+            val s = (25f * (1f - (rel / 0.30f).coerceIn(0f, 1f))).roundToInt()
             s to "${"%.1f".format(bpm)} vs ${"%.1f".format(spectralBpm)} BPM (Δ ${"%.0f".format(rel * 100)}%)"
         } else {
             0 to "Not enough beats to compare"
         }
-        parts += Component("BPM agreement", agreementScore, 30, agreementNote)
+        parts += Component("BPM agreement", agreementScore, 25, agreementNote)
 
-        // 2) Beat acceptance (25) -------------------------------------------
+        // 2) Beat acceptance (20) -------------------------------------------
         val (acceptScore, acceptNote) = if (totalBeats > 0) {
             val ratio = validBeats.toFloat() / totalBeats
-            (25 * ratio).roundToInt() to "$validBeats / $totalBeats beats accepted"
+            (20 * ratio).roundToInt() to "$validBeats / $totalBeats beats accepted"
         } else 0 to "No beats detected"
-        parts += Component("Beat acceptance", acceptScore, 25, acceptNote)
+        parts += Component("Beat acceptance", acceptScore, 20, acceptNote)
 
         // 3) RR variability sanity (15) -------------------------------------
         val cv = if (rrMs.size > 2) {
@@ -110,6 +117,20 @@ object QualityScorer {
             "Coverage", covScore, 15,
             if (timedOut) "Timed out · ${(cov * 100).roundToInt()}% contact"
             else "${(cov * 100).roundToInt()}% contact"
+        )
+
+        // 6) Perfusion index (10) -------------------------------------------
+        // AC/DC ratio of the displayed channel. Gold-standard hardware SQI used
+        // on every clinical pulse oximeter. 0.5 % = poor, 1 % = OK, 3 %+ = strong.
+        val piScore = when {
+            perfusionIndex >= 3f -> 10
+            perfusionIndex >= 1f -> (5 + 5f * (perfusionIndex - 1f) / 2f).roundToInt().coerceIn(5, 10)
+            perfusionIndex >= 0.3f -> (5f * (perfusionIndex - 0.3f) / 0.7f).roundToInt().coerceIn(0, 5)
+            else -> 0
+        }
+        parts += Component(
+            "Perfusion index", piScore, 10,
+            "${"%.2f".format(perfusionIndex)}%  (AC/DC)"
         )
 
         val totalScore = parts.sumOf { it.score }.coerceIn(0, 100)

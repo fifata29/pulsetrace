@@ -20,8 +20,8 @@ import kotlin.math.sqrt
  */
 class SignalProcessor(
     private val windowSeconds: Float = 30f,
-    private val lowHz: Float = 0.7f,    // ~42 BPM
-    private val highHz: Float = 4.0f    // ~240 BPM
+    private val lowHz: Float = 0.5f,    // ~30 BPM; literature standard, preserves morphology harmonics
+    private val highHz: Float = 3.0f    // ~180 BPM; tighter than 4 Hz to suppress dicrotic on G
 ) {
 
     /** Per-sample container.
@@ -99,10 +99,16 @@ class SignalProcessor(
         val despikedR = medianFilter5(uniformR)
         val despikedG = medianFilter5(uniformG)
 
-        val maWin = (1.5f * fs).toInt().coerceAtLeast(5)
-        val detrendedR = movingAverageDetrend(despikedR, maWin)
-        val detrendedG = movingAverageDetrend(despikedG, maWin)
+        // Detrend via zero-phase Butterworth HPF at 0.3 Hz. Replaces the old
+        // 1.5 s moving-average detrend, which had ripply transition band and
+        // smeared baseline drift into the morphology stream. The HPF gives a
+        // flatter passband above 0.5 Hz where the cardiac harmonics live.
+        val detrendedR = butterworthHighpass(despikedR, fs, DETREND_HPF_HZ)
+        val detrendedG = butterworthHighpass(despikedG, fs, DETREND_HPF_HZ)
 
+        // 4th-order zero-phase bandpass (two cascaded biquads through filtfilt).
+        // Sharper rejection of dicrotic harmonics on G + better respiration
+        // rejection on R than the 2nd-order version.
         val filteredR = butterworthBandpass(detrendedR, fs, lowHz, highHz)
         val filteredG = butterworthBandpass(detrendedG, fs, lowHz, highHz)
 
@@ -113,7 +119,14 @@ class SignalProcessor(
         val safeStart = edgeTrim
         val safeEnd = uniformN - edgeTrim
         val peakIdx = if (safeEnd > safeStart + 4) {
-            findPeaks(filteredR, fs, minSeparationSec = 0.35f, fromIdx = safeStart, toIdx = safeEnd)
+            // Elgendi-ERMA (W1/W2 moving-average comparison on clipped+squared
+            // signal). Benchmarked F1 ≈ 99 % in the original PLOS ONE 2013 paper
+            // and immune to the dicrotic-as-second-peak failure mode that the
+            // old RPD detector kept exhibiting on G-channel data — even though
+            // we run peaks on R, R can have residual dicrotic too. Reference:
+            // Elgendi et al. 2013, doi:10.1371/journal.pone.0076585
+            findPeaksErma(filteredR, fs, minSeparationSec = 0.35f,
+                fromIdx = safeStart, toIdx = safeEnd)
         } else IntArray(0)
 
         val displayedFiltered = if (useGreen) filteredG else filteredR
@@ -200,8 +213,10 @@ class SignalProcessor(
         return out
     }
 
-    /** 2nd-order Butterworth bandpass via two biquads, applied forward then backward
-     *  for zero-phase response (filtfilt-style). */
+    /** 4th-order Butterworth bandpass via two cascaded biquads of each kind,
+     *  each applied bidirectionally for zero-phase response (filtfilt-style).
+     *  Effective rolloff is ~24 dB/octave at each band edge once the filtfilt
+     *  doubling is counted, sharper than the previous 2nd-order version. */
     private fun butterworthBandpass(x: FloatArray, fs: Float, low: Float, high: Float): FloatArray {
         val cutLow = low.coerceAtLeast(0.05f)
         val cutHigh = high.coerceAtMost(fs * 0.45f)
@@ -210,8 +225,23 @@ class SignalProcessor(
         val (bHp, aHp) = biquadHighpass(cutLow, fs)
         val (bLp, aLp) = biquadLowpass(cutHigh, fs)
 
-        val s1 = filterBiDirectional(x, bHp, aHp)
-        return filterBiDirectional(s1, bLp, aLp)
+        var s = filterBiDirectional(x, bHp, aHp)
+        s = filterBiDirectional(s, bHp, aHp)
+        s = filterBiDirectional(s, bLp, aLp)
+        s = filterBiDirectional(s, bLp, aLp)
+        return s
+    }
+
+    /** Zero-phase Butterworth highpass — used in place of the old MA detrend.
+     *  Smoothness priors (Tarvainen 2002) would be the literature gold-standard,
+     *  but a 2nd-order biquad applied bidirectionally has a flat passband above
+     *  ~1.5×fc and rejects baseline drift more cleanly than a moving average. */
+    private fun butterworthHighpass(x: FloatArray, fs: Float, fc: Float): FloatArray {
+        val cutLow = fc.coerceAtLeast(0.05f)
+        val (bHp, aHp) = biquadHighpass(cutLow, fs)
+        var s = filterBiDirectional(x, bHp, aHp)
+        s = filterBiDirectional(s, bHp, aHp)
+        return s
     }
 
     private fun biquadHighpass(fc: Float, fs: Float): Pair<FloatArray, FloatArray> {
@@ -336,4 +366,110 @@ class SignalProcessor(
         return out
     }
 
+    /**
+     * Elgendi-ERMA (event-related moving average) peak detector — Elgendi et al.
+     * 2013, "Systolic Peak Detection in Acceleration Photoplethysmograms",
+     * PLOS ONE 8(10):e76585. F1 ≈ 99.8 % on the original validation set; ranks
+     * near the top of Charlton 2022's PPG-beats benchmark.
+     *
+     * Idea: clip-and-square the bandpassed signal, compute two moving averages
+     * (W1 ≈ systolic-peak width, W2 ≈ heartbeat width). A "block of interest"
+     * begins when MA1 rises above MA2 plus an offset and ends when it falls
+     * back below. Each block long enough to be a real systolic excursion
+     * contributes its local maximum as a peak. The dicrotic-notch failure mode
+     * disappears because the notch's MA1 envelope is dwarfed by the systolic
+     * envelope's, never crossing the MA2 threshold.
+     */
+    private fun findPeaksErma(
+        x: FloatArray, fs: Float, minSeparationSec: Float,
+        fromIdx: Int = 0, toIdx: Int = x.size
+    ): IntArray {
+        val n = x.size
+        val start = fromIdx.coerceAtLeast(0)
+        val end = toIdx.coerceAtMost(n)
+        if (end - start < 8) return IntArray(0)
+
+        // Clipped & squared signal — emphasises systolic upswings.
+        val xClip = FloatArray(n) { val v = x[it]; if (v > 0f) v * v else 0f }
+
+        val w1 = (W1_SEC * fs).toInt().coerceAtLeast(3)            // systolic-peak window
+        val w2 = (W2_SEC * fs).toInt().coerceAtLeast(w1 + 1)       // beat-duration window
+        val ma1 = movingAverage(xClip, w1)
+        val ma2 = movingAverage(xClip, w2)
+
+        // Adaptive offset: small fraction of the mean of MA2 over the inspection window.
+        var ma2Sum = 0.0; var ma2N = 0
+        for (i in start until end) { ma2Sum += ma2[i]; ma2N++ }
+        val ma2Mean = if (ma2N > 0) (ma2Sum / ma2N).toFloat() else 0f
+        val offset = ERMA_OFFSET_FRAC * ma2Mean
+
+        val minSep = kotlin.math.ceil(minSeparationSec * fs).toInt().coerceAtLeast(2)
+        val minBlockLen = (w1 * 0.5f).toInt().coerceAtLeast(2)
+        val maxBlockLen = (1.5f * w1).toInt().coerceAtLeast(minBlockLen + 1)
+
+        val peaks = ArrayList<Int>()
+        var inBlock = false
+        var blockStart = start
+        var lastPeak = -minSep
+
+        fun closeBlock(blockEnd: Int) {
+            val len = blockEnd - blockStart
+            if (len < minBlockLen) return
+            // Pick the maximum within the block on the underlying signal.
+            var maxIdx = blockStart; var maxV = x[blockStart]
+            val scanEnd = (blockEnd + (minBlockLen / 2)).coerceAtMost(n - 1)
+            for (k in (blockStart + 1)..scanEnd) {
+                if (x[k] > maxV) { maxV = x[k]; maxIdx = k }
+            }
+            if (maxIdx - lastPeak >= minSep) {
+                peaks.add(maxIdx)
+                lastPeak = maxIdx
+            }
+        }
+
+        for (i in start until end) {
+            val above = ma1[i] > (ma2[i] + offset)
+            if (above && !inBlock) {
+                blockStart = i
+                inBlock = true
+            } else if (inBlock) {
+                if (!above) {
+                    closeBlock(i - 1)
+                    inBlock = false
+                } else if (i - blockStart > maxBlockLen) {
+                    closeBlock(i - 1)
+                    inBlock = false
+                }
+            }
+        }
+        if (inBlock) closeBlock(end - 1)
+
+        val out = IntArray(peaks.size)
+        for (i in peaks.indices) out[i] = peaks[i]
+        return out
+    }
+
+    /** Centred moving average of window [win]; edges use shorter windows. */
+    private fun movingAverage(x: FloatArray, win: Int): FloatArray {
+        val n = x.size
+        if (n == 0 || win <= 1) return x.copyOf()
+        val out = FloatArray(n)
+        val half = win / 2
+        // Prefix sums for O(n) sliding mean.
+        val ps = DoubleArray(n + 1)
+        for (i in 0 until n) ps[i + 1] = ps[i] + x[i]
+        for (i in 0 until n) {
+            val lo = (i - half).coerceAtLeast(0)
+            val hi = (i + half + 1).coerceAtMost(n)
+            out[i] = ((ps[hi] - ps[lo]) / (hi - lo)).toFloat()
+        }
+        return out
+    }
+
+    companion object {
+        private const val DETREND_HPF_HZ = 0.3f
+        private const val W1_SEC = 0.111f          // Elgendi 2013 systolic-peak window
+        private const val W2_SEC = 0.667f          // Elgendi 2013 beat-duration window
+        private const val ERMA_OFFSET_FRAC = 0.02f // small additive offset above MA2 mean
+    }
 }

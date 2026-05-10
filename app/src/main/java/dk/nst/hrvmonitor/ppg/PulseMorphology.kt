@@ -257,36 +257,68 @@ object PulseMorphology {
     )
 
     /**
-     * Foot, systolic peak (global max), dicrotic notch (local min on descending limb,
-     * 2nd-derivative method), diastolic peak (local max after notch).
+     * Derivative-based fiducial detection — pyPPG / PulseAnalyse style.
      *
-     * The averaged beat is aligned at the foot (idx 0). The systolic peak is the
-     * **global** maximum of the beat; the dicrotic notch sits on the descending
-     * limb after it. The notch is only reported as "confident" if its 2nd-derivative
-     * prominence stands out above the d² noise floor by at least [D2_PROMINENCE_K]
-     * standard deviations — otherwise downstream RI/AIx are returned as null
-     * rather than computed on a fabricated fiducial.
+     *  • Foot   : tangent intersection. Line through (idxMaxUpslope, beat[idxMaxUpslope])
+     *             with slope d1[idxMaxUpslope] is intersected with the pre-systolic
+     *             baseline. More reproducible across beats than a local-min search
+     *             because it's defined by slope rather than by amplitude.
+     *  • Sys    : first PPG' (d1) zero-crossing from + to − after foot.
+     *  • Notch  : first prominent positive peak of PPG'' (d2) on the descending limb
+     *             after sys. Same as before but the prominence test against the d²
+     *             noise floor stays in place. Notch must clear D2_PROMINENCE_K · σ(d²)
+     *             to be flagged as confident — otherwise RI/AIx return null.
+     *  • Dia    : next d1 zero-crossing from + to − after notch; falls back to local
+     *             max if the zero crossing is missing.
+     *
+     * Reference: Goda MA, Charlton PH, Behar JA 2024. pyPPG. *Physiol Meas* 45:045001
+     *   https://doi.org/10.1088/1361-6579/ad33a2
      */
     private fun locateFiducials(beat: FloatArray): Fiducials {
         val n = beat.size
+        if (n < 16) return Fiducials(0, 0, 0, 0, notchConfident = false)
 
-        // Global systolic-peak search.
-        var sysIdx = 0; var sysVal = Float.NEGATIVE_INFINITY
-        for (i in 0 until n) if (beat[i] > sysVal) { sysVal = beat[i]; sysIdx = i }
+        // Light 5-point smoothing reduces noise propagation into the derivatives.
+        val smoothed = movingAvg5(beat)
 
-        // Foot: lowest point in the first 15 % of the beat.
-        val footEnd = (n * 0.15f).toInt().coerceAtLeast(1)
-        var footIdx = 0; var footVal = beat[0]
-        for (i in 0 until footEnd) if (beat[i] < footVal) { footVal = beat[i]; footIdx = i }
-
-        // d² across the whole beat.
+        // Central-difference derivatives.
+        val d1 = FloatArray(n)
+        for (i in 1 until n - 1) d1[i] = 0.5f * (smoothed[i + 1] - smoothed[i - 1])
+        d1[0] = d1[1]; d1[n - 1] = d1[n - 2]
         val d2 = FloatArray(n)
-        for (i in 1 until n - 1) d2[i] = beat[i + 1] - 2f * beat[i] + beat[i - 1]
+        for (i in 1 until n - 1) d2[i] = smoothed[i + 1] - 2f * smoothed[i] + smoothed[i - 1]
+        d2[0] = d2[1]; d2[n - 1] = d2[n - 2]
 
-        // Noise floor for d² in the search region: std of d² outside the immediate
-        // foot/sys area.
+        // Maximum upslope: argmax of d1 within the first 40 % of the beat.
+        val upslopeEnd = (n * 0.40f).toInt().coerceAtLeast(4)
+        var msIdx = 1; var msVal = d1[1]
+        for (i in 2 until upslopeEnd) if (d1[i] > msVal) { msVal = d1[i]; msIdx = i }
+
+        // Foot via tangent intersection. Baseline = smoothed[0]; project the
+        // tangent line backwards until it hits that baseline. Clamp to a sane
+        // pre-systolic range so we don't get a negative index on noisy beats.
+        val baseline = smoothed[0]
+        val footIdx = if (msVal > 1e-6f) {
+            val t = msIdx - (smoothed[msIdx] - baseline) / msVal
+            t.toInt().coerceIn(0, (msIdx - 1).coerceAtLeast(0))
+        } else 0
+
+        // Systolic peak: first d1 zero-crossing (+ → −) after msIdx.
+        var sysIdx = -1
+        for (i in msIdx + 1 until n - 1) {
+            if (d1[i] >= 0f && d1[i + 1] < 0f) { sysIdx = i; break }
+        }
+        if (sysIdx < 0) {
+            // Fallback: global max (legacy behaviour on beats with no clean zero-crossing).
+            var maxV = Float.NEGATIVE_INFINITY
+            for (i in 0 until n) if (smoothed[i] > maxV) { maxV = smoothed[i]; sysIdx = i }
+        }
+
+        // Notch search range: 6 % past sys, ending 5 % before end of beat.
         val searchStart = (sysIdx + (n * 0.06f).toInt()).coerceAtMost(n - 4)
         val searchEnd = (n - (n * 0.05f).toInt()).coerceAtLeast(searchStart + 4)
+
+        // d² noise floor inside the search window.
         var d2Sum = 0.0; var d2SumSq = 0.0; var d2Count = 0
         for (i in searchStart until searchEnd) {
             d2Sum += d2[i]; d2SumSq += d2[i].toDouble() * d2[i].toDouble(); d2Count++
@@ -296,6 +328,7 @@ object PulseMorphology {
             kotlin.math.sqrt((d2SumSq / d2Count - m * m).coerceAtLeast(0.0)).toFloat()
         } else 0f
 
+        // Notch = strongest positive d² peak in [searchStart, searchEnd].
         var notchIdx = -1; var bestProm = Float.NEGATIVE_INFINITY
         for (i in searchStart + 1 until searchEnd - 1) {
             if (d2[i] > d2[i - 1] && d2[i] > d2[i + 1] && d2[i] > 0f) {
@@ -305,13 +338,34 @@ object PulseMorphology {
         val notchConfident = notchIdx >= 0 && bestProm > D2_PROMINENCE_K * d2Std
         if (notchIdx < 0) notchIdx = (sysIdx + (n - sysIdx) / 3).coerceIn(searchStart, searchEnd - 1)
 
-        // Diastolic peak: local max strictly after the notch.
-        var diaIdx = notchIdx + 1
-        var diaVal = beat[diaIdx.coerceAtMost(n - 1)]
-        for (i in notchIdx + 1 until searchEnd) if (beat[i] > diaVal) { diaVal = beat[i]; diaIdx = i }
+        // Diastolic peak: first d1 zero-crossing (+ → −) after notch; if missing,
+        // fall back to a local max scan capped at the end of the search window.
+        var diaIdx = -1
+        for (i in notchIdx + 1 until searchEnd - 1) {
+            if (d1[i] >= 0f && d1[i + 1] < 0f) { diaIdx = i; break }
+        }
+        if (diaIdx < 0) {
+            var maxV = smoothed[notchIdx]; diaIdx = notchIdx
+            for (i in notchIdx + 1 until searchEnd) {
+                if (smoothed[i] > maxV) { maxV = smoothed[i]; diaIdx = i }
+            }
+        }
         if (diaIdx <= notchIdx) diaIdx = notchIdx
 
         return Fiducials(footIdx, sysIdx, notchIdx, diaIdx, notchConfident)
+    }
+
+    private fun movingAvg5(x: FloatArray): FloatArray {
+        val n = x.size
+        if (n < 5) return x.copyOf()
+        val out = FloatArray(n)
+        out[0] = x[0]; out[1] = (x[0] + x[1] + x[2]) / 3f
+        for (i in 2 until n - 2) {
+            out[i] = (x[i - 2] + x[i - 1] + x[i] + x[i + 1] + x[i + 2]) / 5f
+        }
+        out[n - 2] = (x[n - 3] + x[n - 2] + x[n - 1]) / 3f
+        out[n - 1] = x[n - 1]
+        return out
     }
 
     private const val D2_PROMINENCE_K = 2.0f

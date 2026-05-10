@@ -433,6 +433,9 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
                 acceptable = it.acceptable
             )
         }
+        // Perfusion index = std(bandpassed) / mean(raw) × 100. Gold-standard
+        // hardware SQI from clinical pulse oximetry.
+        val perfusion = computePerfusionIndex(snap.samples)
         val qualityScore = QualityScorer.scoreFromInputs(
             bpm = metrics.bpm,
             spectralBpm = snap.spectralBpm,
@@ -441,7 +444,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             coverage = snap.coverage,
             validBeats = metrics.validBeats,
             totalBeats = metrics.totalBeats,
-            timedOut = timedOut
+            timedOut = timedOut,
+            perfusionIndex = perfusion
         )
 
         // Pulse-wave morphology: feed the despiked-detrended (NOT bandpassed) signal so
@@ -506,6 +510,23 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             signal = snap.samples,
             report = report
         )
+    }
+
+    private fun computePerfusionIndex(samples: List<SignalProcessor.Sample>): Float {
+        if (samples.size < 16) return 0f
+        var rawSum = 0.0
+        var filtSum = 0.0
+        for (s in samples) { rawSum += s.raw; filtSum += s.filtered }
+        val rawMean = rawSum / samples.size
+        val filtMean = filtSum / samples.size
+        if (rawMean < 1.0) return 0f
+        var filtSS = 0.0
+        for (s in samples) {
+            val d = s.filtered - filtMean
+            filtSS += d * d
+        }
+        val acStd = sqrt(filtSS / samples.size)
+        return (100.0 * acStd / rawMean).toFloat()
     }
 
     override fun onCleared() {

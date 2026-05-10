@@ -222,12 +222,14 @@ private fun ReportContent(
                 onInfo = { onShowExplainer(Metric.Ri) })
             Spacer(Modifier.height(6.dp))
             MorphologyMetricRow("Aging Index", formatAgi(report.morphology.agingIndex),
-                "", "Composite from the 2nd derivative of the pulse waveform (Takazawa). Higher = older vasculature.",
+                "research", "Composite from the 2nd derivative of the pulse waveform (Takazawa). Uncalibrated on this device — research metric only.",
                 onInfo = { onShowExplainer(Metric.AGI) })
             Spacer(Modifier.height(6.dp))
-            MorphologyMetricRow("Vascular age",
-                report.morphology.vascularAgeYears?.let { "${it.toInt()}" } ?: "—",
-                "years", "Estimated arterial age from the Aging Index. Treat as a rough indicator.",
+            // Vascular age computed from AGI via the literature regression. Our AGI
+            // normalisation does not match Takazawa 1998's |PPG''|-based one, so
+            // the years value would be misleading. Hidden until calibrated.
+            MorphologyMetricRow("Vascular age", "—",
+                "uncalibrated", "Hidden until the Aging Index is calibrated against ≥50 paired measurements vs a validated device. Don't infer a years number from this.",
                 onInfo = { onShowExplainer(Metric.VascularAge) })
         }
 
