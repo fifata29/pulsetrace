@@ -54,7 +54,7 @@ import dk.nst.hrvmonitor.ui.theme.Warn
 import dk.nst.hrvmonitor.viewmodel.MeasurementViewModel
 import kotlin.math.roundToInt
 
-private enum class Metric { Bpm, Rmssd, Sdnn, Pnn50, Quality }
+private enum class Metric { Bpm, Rmssd, Sdnn, Pnn50, Quality, CrestTime, Aix, Ri, AGI, VascularAge }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -188,6 +188,47 @@ private fun ReportContent(
                     style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
                 )
             }
+        }
+
+        // Pulse-wave morphology (AIx, Crest Time, etc.) — only when enough clean beats.
+        if (report.morphology != null && report.morphology.isAvailable) {
+            Spacer(Modifier.height(18.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Pulse morphology",
+                    color = OnSurfaceMuted,
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "${report.morphology.nBeats} clean beats averaged",
+                    color = OnSurfaceMuted.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            AveragedBeatChart(morphology = report.morphology)
+            Spacer(Modifier.height(10.dp))
+            MorphologyMetricRow("Crest Time", report.morphology.crestTimeMs?.let { "${it.toInt()}" } ?: "—",
+                "ms", "How quickly the systolic upstroke peaks. Shorter = quicker ejection.",
+                onInfo = { onShowExplainer(Metric.CrestTime) })
+            Spacer(Modifier.height(6.dp))
+            MorphologyMetricRow("Augmentation Index", formatAix(report.morphology.augmentationIndex),
+                "%", "Wave reflection from the periphery. Higher = stiffer arteries / older vasculature.",
+                onInfo = { onShowExplainer(Metric.Aix) })
+            Spacer(Modifier.height(6.dp))
+            MorphologyMetricRow("Reflection Index", formatPct1(report.morphology.reflectionIndex),
+                "%", "Strength of the diastolic peak relative to systolic. Reflects peripheral resistance.",
+                onInfo = { onShowExplainer(Metric.Ri) })
+            Spacer(Modifier.height(6.dp))
+            MorphologyMetricRow("Aging Index", formatAgi(report.morphology.agingIndex),
+                "", "Composite from the 2nd derivative of the pulse waveform (Takazawa). Higher = older vasculature.",
+                onInfo = { onShowExplainer(Metric.AGI) })
+            Spacer(Modifier.height(6.dp))
+            MorphologyMetricRow("Vascular age",
+                report.morphology.vascularAgeYears?.let { "${it.toInt()}" } ?: "—",
+                "years", "Estimated arterial age from the Aging Index. Treat as a rough indicator.",
+                onInfo = { onShowExplainer(Metric.VascularAge) })
         }
 
         Spacer(Modifier.height(18.dp))
@@ -415,6 +456,53 @@ private fun MetricExplainerSheet(
                         "Easier to interpret than RMSSD because the units (%) are intuitive, but more affected by short recording windows."
                     )
                 )
+                Metric.CrestTime -> ExplainerBlock(
+                    title = "Crest Time",
+                    subtitle = "Time from foot to systolic peak (ms)",
+                    body = listOf(
+                        "Measures how quickly the pressure wave rises from its baseline (foot) to its peak (systole). A faster upstroke means lower peripheral resistance and more elastic vessels.",
+                        "Typical adult range at rest: 100–250 ms. Long crest times can suggest stiffer or more resistant vasculature; short ones suggest the opposite.",
+                        "Interpret on yourself — within-person trends are far more meaningful than absolute numbers because phone PPG smooths the upstroke slightly compared to dedicated sensors."
+                    )
+                )
+                Metric.Aix -> ExplainerBlock(
+                    title = "Augmentation Index (AIx)",
+                    subtitle = "Wave reflection / arterial stiffness proxy",
+                    body = listOf(
+                        "AIx is the ratio of the secondary wave amplitude (reflected from the periphery) to the primary systolic peak. Reported as a percentage.",
+                        "Negative AIx is typical in young, elastic vasculature (the reflected wave arrives during diastole, lifting the diastolic baseline without augmenting the systolic peak).",
+                        "AIx rises with age, hypertension, smoking, and other cardiovascular stressors. Smartphone-PPG-derived AIx correlates r ≈ 0.7–0.85 with the clinical gold-standard tonometry.",
+                        "AIx is heart-rate dependent — published AIx values are usually corrected to 75 BPM (AIx@75). We don't apply that correction here, so use AIx as a within-yourself trend rather than a clinical number."
+                    )
+                )
+                Metric.Ri -> ExplainerBlock(
+                    title = "Reflection Index (RI)",
+                    subtitle = "Diastolic vs systolic peak amplitude",
+                    body = listOf(
+                        "Ratio of the diastolic peak amplitude to the systolic peak amplitude, expressed as a percentage.",
+                        "Captures how much pressure-wave energy is reflected back from peripheral vessels. Goes up with peripheral resistance.",
+                        "Like AIx, most useful for tracking your own trends rather than absolute clinical thresholds."
+                    )
+                )
+                Metric.AGI -> ExplainerBlock(
+                    title = "Aging Index (AGI)",
+                    subtitle = "Takazawa's vascular-age composite from the 2nd derivative of the pulse",
+                    body = listOf(
+                        "AGI is computed from five named extrema (a, b, c, d, e) on the second derivative of the pulse waveform. Formula: AGI = (b − c − d − e) / a.",
+                        "Validated by Takazawa et al. (1998 onward) to correlate r ≈ 0.8 with chronological age and to predict cardiovascular mortality in long-term cohort studies.",
+                        "Lower AGI generally corresponds to a younger / more elastic vasculature; higher AGI to stiffer / older.",
+                        "Single-shot smartphone measurements are noisier than dedicated PPG sensors — track trends in yourself rather than reading absolute values."
+                    )
+                )
+                Metric.VascularAge -> ExplainerBlock(
+                    title = "Vascular age estimate",
+                    subtitle = "Years",
+                    body = listOf(
+                        "Rough estimate of how 'old' your arteries look, derived from the Aging Index using a published linear regression of AGI vs chronological age.",
+                        "Treat this as an indicator, not a diagnosis. Single recordings vary; trends over weeks are more meaningful.",
+                        "Lifestyle factors that lower vascular age: aerobic exercise, sleep quality, low salt, no smoking, controlled blood pressure."
+                    )
+                )
                 Metric.Quality -> QualityExplainer(score)
             }
             Spacer(Modifier.height(12.dp))
@@ -508,6 +596,65 @@ private fun formatPnn(v: Float?): String = when {
     v == null -> "—"
     v >= 10f -> v.roundToInt().toString()
     else -> "%.1f".format(v)
+}
+
+private fun formatPct1(v: Float?): String = when {
+    v == null -> "—"
+    else -> "%.1f".format(v)
+}
+
+private fun formatAix(v: Float?): String = when {
+    v == null -> "—"
+    else -> if (v >= 0f) "+${"%.1f".format(v)}" else "%.1f".format(v)
+}
+
+private fun formatAgi(v: Float?): String = when {
+    v == null -> "—"
+    else -> "%.2f".format(v)
+}
+
+@Composable
+private fun MorphologyMetricRow(
+    label: String,
+    value: String,
+    unit: String,
+    summary: String,
+    onInfo: () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(SurfaceElev)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(label, color = Color.White, style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = onInfo, modifier = Modifier.size(20.dp)) {
+                    Icon(
+                        Icons.Outlined.Info, contentDescription = "About $label",
+                        tint = OnSurfaceMuted, modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
+            Text(summary, color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
+        }
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(value, color = Accent, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+            if (unit.isNotEmpty()) {
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    unit,
+                    color = OnSurfaceMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(bottom = 2.dp)
+                )
+            }
+        }
+    }
 }
 
 private fun bpmInterpretation(bpm: Float?): String {

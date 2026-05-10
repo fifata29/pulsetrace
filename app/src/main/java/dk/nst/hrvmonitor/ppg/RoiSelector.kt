@@ -44,7 +44,8 @@ object RoiSelector {
         tilesPerFrame: List<TileGridAnalyzer.TileSample>,
         gridCols: Int,
         gridRows: Int,
-        topK: Int = 6,
+        topK: Int = 14,
+        scoreFloorFraction: Float = 0.6f,   // include only tiles with score ≥ 60 % of best
         lowHz: Float = 0.7f,
         highHz: Float = 4.0f,
         minScore: Float = 0.05f
@@ -152,11 +153,14 @@ object RoiSelector {
         val medianBin = histWeights.indices.maxByOrNull { histWeights[it] } ?: 0
         val medianFreq = lowHz + (medianBin + 0.5f) * freqStep
 
-        // Pick top-K by score.
+        // Pick top-K by score, but only include tiles within [scoreFloorFraction] of the best.
+        // This avoids diluting the ROI with lukewarm tiles when the strong cluster is small.
         val ordered = (0 until nTiles).sortedByDescending { score[it] }
+        val bestScore = if (ordered.isNotEmpty()) score[ordered[0]] else 0f
+        val floor = bestScore * scoreFloorFraction
         val picked = mutableListOf<Int>()
         for (i in ordered) {
-            if (score[i] <= 0f) break
+            if (score[i] <= 0f || score[i] < floor) break
             picked += i
             if (picked.size >= topK) break
         }

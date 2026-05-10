@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import dk.nst.hrvmonitor.data.SessionRecorder
 import dk.nst.hrvmonitor.data.StateTag
 import dk.nst.hrvmonitor.ppg.HrvCalculator
+import dk.nst.hrvmonitor.ppg.PulseMorphology
 import dk.nst.hrvmonitor.ppg.QualityScorer
 import dk.nst.hrvmonitor.ppg.RoiSelector
 import dk.nst.hrvmonitor.ppg.SignalProcessor
@@ -81,7 +82,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         val sessionPath: String?,
         val roi: RoiInfo?,
         val spectralBpm: Float = 0f,
-        val tag: StateTag? = null
+        val tag: StateTag? = null,
+        val morphology: PulseMorphology.Result? = null
     )
 
     private val processor = SignalProcessor(windowSeconds = 60f)
@@ -353,6 +355,18 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             totalBeats = metrics.totalBeats,
             timedOut = timedOut
         )
+
+        // Pulse-wave morphology: spline-upsample the bandpassed signal, segment
+        // into beats, average them, and extract Crest Time, AIx, RI, AGI, vascular age.
+        val morphology = if (snap.samples.size > 32 && snap.peaks.size >= 4) {
+            val filtered = FloatArray(snap.samples.size) { snap.samples[it].filtered }
+            val firstT = snap.samples.first().tSec
+            val dt = (snap.samples.last().tSec - firstT) / (snap.samples.size - 1).coerceAtLeast(1)
+            val peakIdx = if (dt > 0f)
+                snap.peaks.map { ((it.tSec - firstT) / dt).toInt().coerceIn(0, snap.samples.size - 1) }.toIntArray()
+            else IntArray(0)
+            PulseMorphology.compute(filtered, snap.sampleRateHz, peakIdx)
+        } else null
         val session = recorder.stop(
             durationSec = measureElapsed,
             sampleRateHz = snap.sampleRateHz,
@@ -366,7 +380,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             targetGoodSec = TARGET_GOOD_SEC,
             timedOut = timedOut,
             spectralBpm = snap.spectralBpm,
-            qualityScore = qualityScore
+            qualityScore = qualityScore,
+            morphology = morphology
         )
 
         val report = Report(
@@ -381,7 +396,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             peaks = snap.peaks,
             sessionPath = session?.dir?.absolutePath,
             roi = _state.value.roi,
-            spectralBpm = snap.spectralBpm
+            spectralBpm = snap.spectralBpm,
+            morphology = morphology
         )
 
         _state.value = _state.value.copy(

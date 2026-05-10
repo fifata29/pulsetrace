@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dk.nst.hrvmonitor.ppg.HrvCalculator
+import dk.nst.hrvmonitor.ppg.PulseMorphology
 import dk.nst.hrvmonitor.ppg.QualityScorer
 import dk.nst.hrvmonitor.ppg.SignalProcessor
 import kotlinx.coroutines.CoroutineScope
@@ -124,7 +125,8 @@ class SessionRecorder(private val appContext: Context) {
         targetGoodSec: Float = 0f,
         timedOut: Boolean = false,
         spectralBpm: Float = 0f,
-        qualityScore: QualityScorer.Score? = null
+        qualityScore: QualityScorer.Score? = null,
+        morphology: PulseMorphology.Result? = null
     ): Session? {
         val session = current ?: return null
         finishWriterIfActive()
@@ -136,7 +138,7 @@ class SessionRecorder(private val appContext: Context) {
                         session, durationSec, sampleRateHz, coverage,
                         peaks, rrMs, metrics, samplesWritten,
                         roi, goodSec, targetGoodSec, timedOut, spectralBpm,
-                        qualityScore
+                        qualityScore, morphology
                     ))
                 }
                 Log.i(TAG, "Summary written to ${session.summaryJson.absolutePath}")
@@ -167,7 +169,8 @@ class SessionRecorder(private val appContext: Context) {
         targetGoodSec: Float,
         timedOut: Boolean,
         spectralBpm: Float,
-        qualityScore: QualityScorer.Score?
+        qualityScore: QualityScorer.Score?,
+        morphology: PulseMorphology.Result?
     ): String = buildString {
         append("{\n")
         append("  \"session_id\": \"${s.dir.name}\",\n")
@@ -205,6 +208,24 @@ class SessionRecorder(private val appContext: Context) {
         append("  },\n")
         append("  \"rr_intervals_ms\": [${rrMs.joinToString(",") { "%.2f".format(Locale.US, it) }}],\n")
         append("  \"peak_times_sec\": [${peaks.joinToString(",") { "%.4f".format(Locale.US, it.tSec) }}]")
+        if (morphology != null && morphology.isAvailable) {
+            append(",\n")
+            append("  \"morphology\": {\n")
+            append("    \"n_beats\": ${morphology.nBeats},\n")
+            append("    \"crest_time_ms\": ${num(morphology.crestTimeMs)},\n")
+            append("    \"reflection_index_pct\": ${num(morphology.reflectionIndex)},\n")
+            append("    \"augmentation_index_pct\": ${num(morphology.augmentationIndex)},\n")
+            append("    \"stiffness_index_inv_s\": ${num(morphology.stiffnessIndexInv)},\n")
+            append("    \"aging_index\": ${num(morphology.agingIndex)},\n")
+            append("    \"vascular_age_years\": ${num(morphology.vascularAgeYears)},\n")
+            append("    \"averaged_beat\": [${morphology.averagedBeat.joinToString(",") { "%.4f".format(Locale.US, it) }}],\n")
+            append("    \"averaged_beat_time_sec\": [${morphology.averagedBeatTime.joinToString(",") { "%.4f".format(Locale.US, it) }}],\n")
+            append("    \"foot_idx\": ${morphology.footIdx},\n")
+            append("    \"systolic_peak_idx\": ${morphology.systolicPeakIdx},\n")
+            append("    \"dicrotic_notch_idx\": ${morphology.dicroticNotchIdx},\n")
+            append("    \"diastolic_peak_idx\": ${morphology.diastolicPeakIdx}\n")
+            append("  }")
+        }
         if (qualityScore != null) {
             append(",\n")
             append("  \"quality\": {\n")

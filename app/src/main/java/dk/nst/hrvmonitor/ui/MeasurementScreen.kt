@@ -465,10 +465,12 @@ private fun CameraSection(
                 val analysisBuilder = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setResolutionSelector(resolution)
+                // Request 60 fps; the device may negotiate down to 30 if the
+                // sensor/AE pipeline can't sustain 60 at this resolution.
                 Camera2Interop.Extender(analysisBuilder)
                     .setCaptureRequestOption(
                         CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                        Range(30, 30)
+                        Range(30, 60)
                     )
                 val analysis = analysisBuilder.build()
                     .also { it.setAnalyzer(analysisExecutor, analyzer) }
