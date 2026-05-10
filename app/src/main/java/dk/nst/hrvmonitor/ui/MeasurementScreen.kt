@@ -71,6 +71,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dk.nst.hrvmonitor.ui.components.BpmHero
 import dk.nst.hrvmonitor.ui.components.HrvMetricsRow
+import dk.nst.hrvmonitor.ui.components.InlineBreathingPacer
 import dk.nst.hrvmonitor.ui.components.QualityBar
 import dk.nst.hrvmonitor.ui.components.ReportSheet
 import dk.nst.hrvmonitor.ui.components.SignalChart
@@ -91,6 +92,12 @@ fun MeasurementScreen(
     viewModel: MeasurementViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // Keep the screen awake while a measurement is in progress so the user can
+    // focus on the breathing pacer without the display dimming.
+    val view = androidx.compose.ui.platform.LocalView.current
+    LaunchedEffect(state.isMeasuring) {
+        view.keepScreenOn = state.isMeasuring
+    }
     val context = LocalContext.current
 
     var hasCamera by remember {
@@ -156,6 +163,13 @@ private fun ContentLayout(
     ) {
         Header(state.phase, onOpenCalibrate, onOpenSessions, onOpenPacer)
         Spacer(Modifier.height(8.dp))
+
+        // Inline breathing pacer — only while a measurement is active. Helps the
+        // user breathe at 6 BPM (resonant) for cleaner HRV; collapsed when idle.
+        if (state.isMeasuring) {
+            InlineBreathingPacer(enabled = true)
+            Spacer(Modifier.height(8.dp))
+        }
 
         CameraSection(
             phase = state.phase,
