@@ -319,10 +319,29 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         synchronized(searchBuffer) { searchBuffer.clear() }
         phaseRef = Phase.Settling
 
-        _state.value = UiState(
+        // Reset measurement-specific fields but PRESERVE site, snapshotState,
+        // snapshotStage1Report, composite. Using UiState() fresh would clobber
+        // the snapshot bookkeeping that startCardiacSnapshot() / continueSnapshotStage2()
+        // sets up before calling start().
+        _state.value = _state.value.copy(
             phase = Phase.Settling,
-            site = currentSite,
-            isMeasuring = true
+            isMeasuring = true,
+            elapsedSec = 0f,
+            goodSec = 0f,
+            settleProgress = 0f,
+            searchProgress = 0f,
+            measureProgress = 0f,
+            isGoodSignal = false,
+            sampleRateHz = 0f,
+            coverage = 0f,
+            signal = emptyList(),
+            peaks = emptyList(),
+            rrMs = emptyList(),
+            metrics = HrvCalculator.Metrics(null, null, null, null, 0, 0),
+            roi = null,
+            report = null,
+            bestTileRow = -1,
+            bestTileCol = -1
         )
 
         refreshJob = viewModelScope.launch(Dispatchers.Default) {
