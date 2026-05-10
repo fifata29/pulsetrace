@@ -15,6 +15,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -52,6 +53,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -203,6 +206,8 @@ fun RawModeScreen(
                     .background(SurfaceDark)
             ) {
                 AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+                HeatmapOverlay(state, Modifier.fillMaxSize())
+                BestTileMarker(state, Modifier.fillMaxSize())
             }
             Spacer(Modifier.height(10.dp))
 
@@ -221,7 +226,7 @@ fun RawModeScreen(
             PulseStrengthBar(state)
             Spacer(Modifier.height(8.dp))
 
-            PressureBar(state)
+            PositionScoutHint(state)
             Spacer(Modifier.height(10.dp))
 
             if (state.isRecording && state.sweepPrompt.isNotBlank()) {
@@ -311,8 +316,12 @@ private fun SweepToggleRow(on: Boolean, onSet: (Boolean) -> Unit) {
 
 @Composable
 private fun PulseStrengthBar(state: RawModeViewModel.UiState) {
-    val ps = state.pulseStrengthG
-    val ref = state.pulseStrengthMaxSeen.coerceAtLeast(0.5f)
+    // Best-tile AC: std of last ~2 s of green-channel mean for the strongest
+    // tile in the grid. Independent of how many other tiles are dark/saturated,
+    // so it tracks "how good is the best spot right now" rather than a noisy
+    // whole-frame average.
+    val ps = state.bestTileAc
+    val ref = state.bestTileAcMaxSeen.coerceAtLeast(0.5f)
     val frac = (ps / ref).coerceIn(0f, 1f)
     val barColor = when {
         ps > 1.5f -> Good
@@ -327,7 +336,7 @@ private fun PulseStrengthBar(state: RawModeViewModel.UiState) {
             .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Pulse strength (G)", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            Text("Pulse strength — best tile (G)", color = Color.White, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.weight(1f))
             Text(
                 "%.2f / %.2f".format(ps, ref),
@@ -349,8 +358,8 @@ private fun PulseStrengthBar(state: RawModeViewModel.UiState) {
 }
 
 @Composable
-private fun PressureBar(state: RawModeViewModel.UiState) {
-    val haveRange = state.sessionMaxDcG - state.sessionMinDcG > 1.5f
+private fun PositionScoutHint(state: RawModeViewModel.UiState) {
+    val haveBest = state.bestTileRow >= 0 && state.bestTileAc > 0.3f
     Column(
         Modifier
             .fillMaxWidth()
@@ -359,31 +368,85 @@ private fun PressureBar(state: RawModeViewModel.UiState) {
             .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Pressure (relative)", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            Text("Position scout", color = Color.White, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.weight(1f))
             Text(
-                if (haveRange) "%d%%  · DC G %.0f".format((state.pressureFrac * 100).roundToInt(), state.medianDcG)
-                else "vary pressure to calibrate",
+                if (haveBest) "best tile row ${state.bestTileRow}, col ${state.bestTileCol} · AC ${"%.2f".format(state.bestTileAc)}"
+                else "no signal yet",
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.labelSmall
             )
         }
-        Spacer(Modifier.height(6.dp))
-        LinearProgressIndicator(
-            progress = { if (haveRange) state.pressureFrac else 0f },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(8.dp)
-                .clip(RoundedCornerShape(4.dp)),
-            color = Accent,
-            trackColor = Color.White.copy(alpha = 0.10f)
-        )
         Spacer(Modifier.height(4.dp))
         Text(
-            if (haveRange) "Range G ${state.sessionMinDcG.roundToInt()} → ${state.sessionMaxDcG.roundToInt()}"
-            else "Will populate once you've pressed firm + released during a session",
+            if (haveBest)
+                "Slide the phone laterally — the bright region on the preview shows where the pulse is. " +
+                    "When the heat-map is bright and centered, you've found the lateral sweet-spot."
+            else
+                "Place the phone on skin and wait ~2 s. The preview will overlay a heat-map showing " +
+                    "which areas are picking up the pulse. Slide laterally to maximize the bright region.",
             color = OnSurfaceMuted,
-            style = MaterialTheme.typography.labelSmall
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp)
+        )
+    }
+}
+
+/**
+ * Translucent heat-map overlay rendered on top of the camera preview. Each tile
+ * is filled with a colour whose alpha tracks its rolling green-channel AC,
+ * normalized to the strongest tile in the current frame. This lets the user
+ * slide the phone laterally and watch the bright region track the actual pulse,
+ * rather than guessing from raw brightness which only reflects the flash spot.
+ */
+@Composable
+private fun HeatmapOverlay(state: RawModeViewModel.UiState, modifier: Modifier) {
+    val tileAc = state.tileAc
+    val cols = state.gridCols
+    val rows = state.gridRows
+    if (tileAc.isEmpty()) return
+    var maxAc = 0f
+    for (v in tileAc) if (v > maxAc) maxAc = v
+    if (maxAc < 0.05f) return
+    Canvas(modifier) {
+        val tileW = size.width / cols
+        val tileH = size.height / rows
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                val v = (tileAc[r * cols + c] / maxAc).coerceIn(0f, 1f)
+                if (v < 0.15f) continue
+                // viridis-ish gradient from dim teal -> green -> yellow
+                val red = (v * v).coerceIn(0f, 1f)
+                val grn = (0.4f + 0.6f * v).coerceIn(0f, 1f)
+                val blu = (0.5f - 0.5f * v).coerceIn(0f, 1f)
+                val alpha = (0.05f + v * 0.45f).coerceIn(0f, 0.55f)
+                drawRect(
+                    color = Color(red, grn, blu, alpha),
+                    topLeft = Offset(c * tileW, r * tileH),
+                    size = Size(tileW, tileH)
+                )
+            }
+        }
+    }
+}
+
+/** Outlines the single best-AC tile so the user knows where the live pulse-strength
+ *  bar's reading is coming from. */
+@Composable
+private fun BestTileMarker(state: RawModeViewModel.UiState, modifier: Modifier) {
+    val r = state.bestTileRow
+    val c = state.bestTileCol
+    if (r < 0 || c < 0 || state.bestTileAc < 0.3f) return
+    val cols = state.gridCols
+    val rows = state.gridRows
+    Canvas(modifier) {
+        val tileW = size.width / cols
+        val tileH = size.height / rows
+        val stroke = 3f
+        drawRect(
+            color = Color.White,
+            topLeft = Offset(c * tileW + stroke / 2, r * tileH + stroke / 2),
+            size = Size(tileW - stroke, tileH - stroke),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
         )
     }
 }
@@ -532,9 +595,8 @@ private fun ExplainerOrPath(state: RawModeViewModel.UiState) {
             Spacer(Modifier.height(4.dp))
             Text(
                 "60 FPS · 16×12 tile grid · per-tile R, G, B mean and within-tile std. " +
-                    "AE/AWB lock at Start. Tap Start with the chosen body site in good contact " +
-                    "with the lens (light pressure for forearm, full coverage for fingertip). " +
-                    "240 s of forearm at 60 FPS = ~80 MB.",
+                    "Heat-map overlays the preview with which tiles are picking up pulse signal — " +
+                    "slide the phone laterally to maximize the bright region before tapping Start.",
                 color = OnSurfaceMuted,
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp)
             )

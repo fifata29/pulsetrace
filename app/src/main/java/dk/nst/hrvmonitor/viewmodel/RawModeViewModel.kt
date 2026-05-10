@@ -19,13 +19,12 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
     enum class Site { Fingertip, Forearm, Wrist, Other }
 
     /**
-     * Sweep mode walks the user through a fixed pressure protocol so we can
-     * compute their personal "press 0–100" range and find the AC-peak optimum
-     * offline. Layout (in seconds since Start):
+     * Sweep mode walks the user through a fixed pressure protocol so the AC-vs-DC
+     * curve can be analysed offline. Layout (s since Start):
      *   0–5   PRESS FIRM
      *   5–10  RELEASE
      *  10–25  Slowly vary pressure: light ↔ firm
-     *  25+    Hold at the level that gave the strongest pulse
+     *  25+   Hold at the strongest-pulse level
      */
     data class UiState(
         val isRecording: Boolean = false,
@@ -41,21 +40,25 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
         val centerLumaR: Float = 0f,
         val centerLumaG: Float = 0f,
         val centerLumaB: Float = 0f,
-        // Live pulse-strength + pressure indicators driven by median G across the
-        // 16×12 tile grid. Pulse strength is the std of detrended median-G over
-        // the last ~2 s. Pressure fraction maps the current DC into the [min,max]
-        // range observed since the screen opened (or since Start in sweep mode).
-        val pulseStrengthG: Float = 0f,
-        val pulseStrengthMaxSeen: Float = 0f,
-        val medianDcG: Float = 0f,
-        val sessionMinDcG: Float = 0f,
-        val sessionMaxDcG: Float = 0f,
-        val pressureFrac: Float = 0f,
+        // Position-scout: per-tile rolling AC amplitude (std of last ~2 s of
+        // green channel). Row-major over (row, col); length = gridCols·gridRows.
+        // The screen overlays this on the camera preview as a heat-map so the
+        // user can hunt the optimal lateral position before tapping Start.
+        val tileAc: FloatArray = FloatArray(GRID_COLS * GRID_ROWS),
+        val bestTileRow: Int = -1,
+        val bestTileCol: Int = -1,
+        val bestTileAc: Float = 0f,
+        val bestTileAcMaxSeen: Float = 0f,
         val sessionPath: String? = null,
         val csvPath: String? = null,
         val gridCols: Int = GRID_COLS,
         val gridRows: Int = GRID_ROWS
-    )
+    ) {
+        // Default array-equality on data classes is identity; we don't compare
+        // two UiStates for equality anywhere that would care, so leave it.
+        override fun equals(other: Any?): Boolean = this === other
+        override fun hashCode(): Int = System.identityHashCode(this)
+    }
 
     private val recorder = RawRecorder(application.applicationContext)
     private val _state = MutableStateFlow(UiState())
@@ -71,33 +74,19 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
     @Volatile private var latestR: Float = 0f
     @Volatile private var latestG: Float = 0f
     @Volatile private var latestB: Float = 0f
+    @Volatile private var bestTileAcMaxSeen: Float = 0f
 
-    // Ring buffer of recent median-G values across the whole tile grid (live
-    // feedback for pulse strength). Median is robust to dark/saturated tiles.
-    private val ringSize = RING_BUFFER_SIZE
-    private val ringG = FloatArray(ringSize)
+    // Per-tile ring buffer of the green-channel mean. Each tile gets its own
+    // RING_BUFFER_SIZE-element ring. Total memory: 192 × 128 × 4 B ≈ 96 KB.
+    private val ringPerTile: Array<FloatArray> =
+        Array(GRID_COLS * GRID_ROWS) { FloatArray(RING_BUFFER_SIZE) }
     @Volatile private var ringWritten: Long = 0L
-    @Volatile private var latestMedianG: Float = 0f
-    @Volatile private var sessionMinG: Float = Float.MAX_VALUE
-    @Volatile private var sessionMaxG: Float = 0f
-    @Volatile private var pulseStrengthMaxSeen: Float = 0f
-    private val sortScratch = FloatArray(GRID_COLS * GRID_ROWS)
 
     val analyzer = RawTileAnalyzer(GRID_COLS, GRID_ROWS) { sample ->
-        // Live indicators run continuously while the screen is open so the user
-        // can hunt for the pressure sweet-spot before tapping Start.
         val n = sample.gMean.size
-        System.arraycopy(sample.gMean, 0, sortScratch, 0, n)
-        java.util.Arrays.sort(sortScratch, 0, n)
-        val medianG = sortScratch[n / 2]
-        latestMedianG = medianG
-
-        val idx = (ringWritten % ringSize).toInt()
-        ringG[idx] = medianG
+        val slot = (ringWritten % RING_BUFFER_SIZE).toInt()
+        for (i in 0 until n) ringPerTile[i][slot] = sample.gMean[i]
         ringWritten++
-
-        if (medianG < sessionMinG) sessionMinG = medianG
-        if (medianG > sessionMaxG) sessionMaxG = medianG
 
         val centerIdx = (GRID_ROWS / 2) * GRID_COLS + (GRID_COLS / 2)
         latestR = sample.rMean.getOrNull(centerIdx) ?: 0f
@@ -112,23 +101,33 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun pulseStrengthFromRing(): Float {
-        val have = if (ringWritten >= ringSize.toLong()) ringSize else ringWritten.toInt()
-        if (have < 8) return 0f
-        // Walk the ring in chronological order
-        val tmp = FloatArray(have)
-        val start = if (ringWritten >= ringSize.toLong())
-            (ringWritten % ringSize).toInt() else 0
-        for (i in 0 until have) tmp[i] = ringG[(start + i) % ringSize]
-        var sum = 0.0
-        for (v in tmp) sum += v
-        val mean = (sum / have).toFloat()
-        var ss = 0.0
-        for (v in tmp) {
-            val d = v - mean
-            ss += d * d
+    /** Returns (tileAc array, bestIdx, bestAc). tileAc[i] is the std of the
+     *  recent green-channel values for tile i, used as a fast pulse-amplitude
+     *  proxy. */
+    private fun computeTileAcs(): Triple<FloatArray, Int, Float> {
+        val nTiles = GRID_COLS * GRID_ROWS
+        val out = FloatArray(nTiles)
+        val have = if (ringWritten >= RING_BUFFER_SIZE.toLong())
+            RING_BUFFER_SIZE else ringWritten.toInt()
+        if (have < 8) return Triple(out, -1, 0f)
+        var bestIdx = -1
+        var bestAc = 0f
+        for (i in 0 until nTiles) {
+            val ring = ringPerTile[i]
+            var sum = 0.0
+            var sumSq = 0.0
+            for (j in 0 until have) {
+                val v = ring[j]
+                sum += v
+                sumSq += v * v
+            }
+            val mean = sum / have
+            val variance = (sumSq / have - mean * mean).coerceAtLeast(0.0)
+            val ac = sqrt(variance).toFloat()
+            out[i] = ac
+            if (ac > bestAc) { bestAc = ac; bestIdx = i }
         }
-        return sqrt(ss / have).toFloat()
+        return Triple(out, bestIdx, bestAc)
     }
 
     private fun sweepPromptFor(elapsed: Float, sweepMode: Boolean): String {
@@ -155,7 +154,6 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
         if (_state.value.isRecording) return
         _state.value = _state.value.copy(
             sweepMode = on,
-            // Sweep needs at least the protocol length + a little hold time
             targetSec = if (on) maxOf(_state.value.targetSec, SWEEP_MIN_DURATION) else _state.value.targetSec
         )
     }
@@ -166,10 +164,7 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
         firstSampleNs = 0L
         lastSampleNs = 0L
         latestR = 0f; latestG = 0f; latestB = 0f
-        // Reset session-relative pressure scale so each recording starts fresh.
-        sessionMinG = Float.MAX_VALUE
-        sessionMaxG = 0f
-        pulseStrengthMaxSeen = 0f
+        bestTileAcMaxSeen = 0f
         startNs = System.nanoTime()
 
         val target = _state.value.targetSec
@@ -197,7 +192,6 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
             sessionPath = session.dir.absolutePath,
             csvPath = session.csv.absolutePath
         )
-
     }
 
     private fun startRefreshLoop() {
@@ -205,13 +199,10 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
         refreshJob = viewModelScope.launch(Dispatchers.Default) {
             while (true) {
                 val s = _state.value
-                val ps = pulseStrengthFromRing()
-                if (ps > pulseStrengthMaxSeen) pulseStrengthMaxSeen = ps
-                val minG = if (sessionMinG == Float.MAX_VALUE) 0f else sessionMinG
-                val maxG = sessionMaxG
-                val frac = if (maxG - minG > 1.5f) {
-                    ((latestMedianG - minG) / (maxG - minG)).coerceIn(0f, 1f)
-                } else 0f
+                val (tileAc, bestIdx, bestAc) = computeTileAcs()
+                if (bestAc > bestTileAcMaxSeen) bestTileAcMaxSeen = bestAc
+                val bestRow = if (bestIdx >= 0) bestIdx / GRID_COLS else -1
+                val bestCol = if (bestIdx >= 0) bestIdx % GRID_COLS else -1
 
                 if (s.isRecording) {
                     val elapsed = (System.nanoTime() - startNs) / 1e9f
@@ -227,12 +218,11 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
                         centerLumaR = latestR,
                         centerLumaG = latestG,
                         centerLumaB = latestB,
-                        pulseStrengthG = ps,
-                        pulseStrengthMaxSeen = pulseStrengthMaxSeen,
-                        medianDcG = latestMedianG,
-                        sessionMinDcG = minG,
-                        sessionMaxDcG = maxG,
-                        pressureFrac = frac,
+                        tileAc = tileAc,
+                        bestTileRow = bestRow,
+                        bestTileCol = bestCol,
+                        bestTileAc = bestAc,
+                        bestTileAcMaxSeen = bestTileAcMaxSeen,
                         sweepPrompt = sweepPromptFor(elapsed, s.sweepMode)
                     )
                     if (elapsed >= s.targetSec) finalize()
@@ -241,12 +231,11 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
                         centerLumaR = latestR,
                         centerLumaG = latestG,
                         centerLumaB = latestB,
-                        pulseStrengthG = ps,
-                        pulseStrengthMaxSeen = pulseStrengthMaxSeen,
-                        medianDcG = latestMedianG,
-                        sessionMinDcG = minG,
-                        sessionMaxDcG = maxG,
-                        pressureFrac = frac
+                        tileAc = tileAc,
+                        bestTileRow = bestRow,
+                        bestTileCol = bestCol,
+                        bestTileAc = bestAc,
+                        bestTileAcMaxSeen = bestTileAcMaxSeen
                     )
                 }
                 delay(REFRESH_MS)
@@ -278,12 +267,11 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
     companion object {
         const val DEFAULT_DURATION_SEC = 120f
         const val TARGET_FPS = 60
-        private const val GRID_COLS = 16
-        private const val GRID_ROWS = 12
+        const val GRID_COLS = 16
+        const val GRID_ROWS = 12
         private const val REFRESH_MS = 100L
         private const val RING_BUFFER_SIZE = 128 // ~2 s @ 60 Hz
 
-        // Sweep-mode protocol timing (seconds since Start)
         const val SWEEP_PRESS_END = 5f
         const val SWEEP_RELEASE_END = 10f
         const val SWEEP_VARY_END = 25f
