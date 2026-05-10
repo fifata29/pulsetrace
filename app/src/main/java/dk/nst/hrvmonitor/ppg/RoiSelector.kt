@@ -48,7 +48,11 @@ object RoiSelector {
         scoreFloorFraction: Float = 0.6f,   // include only tiles with score ≥ 60 % of best
         lowHz: Float = 0.7f,
         highHz: Float = 4.0f,
-        minScore: Float = 0.05f
+        minScore: Float = 0.05f,
+        // For forearm/wrist sites, score on green: red's bright-spot region
+        // dominates AC for the wrong reason (flash glare) and pulls the ROI
+        // away from where superficial-vessel pulsation actually lives.
+        useGreen: Boolean = false
     ): Result {
         val n = tilesPerFrame.size
         val nTiles = gridCols * gridRows
@@ -68,8 +72,11 @@ object RoiSelector {
         val uniformDt = if (durSec > 0f) durSec / (uniformN - 1) else 1f / fs
         val uniformGrid = Array(nTiles) { FloatArray(uniformN) }
         for (tile in 0 until nTiles) {
-            // Pull the per-frame value for this tile.
-            val series = FloatArray(n) { tilesPerFrame[it].tilesR[tile] }
+            // Pull the per-frame value for this tile (R or G depending on site).
+            val series = FloatArray(n) {
+                if (useGreen) tilesPerFrame[it].tilesG[tile]
+                else tilesPerFrame[it].tilesR[tile]
+            }
             var idx = 0
             for (i in 0 until uniformN) {
                 val t = i * uniformDt

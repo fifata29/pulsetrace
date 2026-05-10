@@ -311,7 +311,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             tilesPerFrame = frames,
             gridCols = GRID_COLS,
             gridRows = GRID_ROWS,
-            topK = ROI_TOP_K
+            topK = ROI_TOP_K,
+            useGreen = _state.value.site == Site.Forearm
         )
         val info = RoiInfo(
             rowStart = result.bboxRowStart,

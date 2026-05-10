@@ -528,12 +528,14 @@ private fun CameraSection(
                 val analysisBuilder = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setResolutionSelector(resolution)
-                // Request 60 fps; the device may negotiate down to 30 if the
-                // sensor/AE pipeline can't sustain 60 at this resolution.
+                // Lock to 60 fps. Range(30,60) lets the device negotiate down
+                // (and OnePlus 11 was choosing 30 with torch + adaptive AE);
+                // a fixed 60 forces sustained throughput for cleaner timing
+                // resolution in the bandpass + peak detection.
                 Camera2Interop.Extender(analysisBuilder)
                     .setCaptureRequestOption(
                         CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                        Range(30, 60)
+                        Range(60, 60)
                     )
                 val analysis = analysisBuilder.build()
                     .also { it.setAnalyzer(analysisExecutor, analyzer) }
