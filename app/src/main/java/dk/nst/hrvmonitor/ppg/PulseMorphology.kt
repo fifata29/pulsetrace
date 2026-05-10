@@ -101,15 +101,29 @@ object PulseMorphology {
         // Locate feet (local minimum just before each systolic peak).
         val feet = locateFeet(up, peaksUp)
 
-        // Slice beats foot[i]..foot[i+1] and resample to a common length.
+        // Slice beats foot[i]..foot[i+1]. Two-stage filter:
+        //   (a) Hard physiological range (0.4–1.6 s).
+        //   (b) Hampel-style: reject beats whose duration is > 30 % from the median.
+        // The second stage catches "missed peak → 1.5×-cycle segment" cases that
+        // pass the hard filter but corrupt the averaged shape.
         val rawBeats = mutableListOf<FloatArray>()
         val beatDurationsSec = mutableListOf<Float>()
+        val provisional = mutableListOf<Pair<FloatArray, Float>>()
         for (i in 0 until feet.size - 1) {
             val a = feet[i]; val b = feet[i + 1]
             val durSec = (b - a) / fsUp
             if (durSec !in MIN_BEAT_S..MAX_BEAT_S) continue
-            rawBeats += resampleSegment(up, a, b, BEAT_LEN)
-            beatDurationsSec += durSec
+            provisional += resampleSegment(up, a, b, BEAT_LEN) to durSec
+        }
+        if (provisional.size < MIN_VALID_BEATS) return Result.unavailable(provisional.size)
+        val provDurations = provisional.map { it.second }.sorted()
+        val medProvDur = provDurations[provDurations.size / 2]
+        for ((beat, dur) in provisional) {
+            val rel = dur / medProvDur
+            if (rel in 0.7f..1.3f) {
+                rawBeats += beat
+                beatDurationsSec += dur
+            }
         }
         if (rawBeats.size < MIN_VALID_BEATS) return Result.unavailable(rawBeats.size)
 
@@ -187,11 +201,22 @@ object PulseMorphology {
         )
     }
 
-    /** Walk back from each peak to its local minimum since the previous peak. */
+    /**
+     * Walk back from each peak to its local minimum, but **only within the last
+     * 30 % of the inter-peak interval**. The pre-systolic foot is always at the
+     * very end of diastole — searching the whole interval risks picking up the
+     * dicrotic-notch valley earlier in the cycle, which then segments the beat
+     * starting at the wrong point.
+     */
     private fun locateFeet(x: FloatArray, peaksUp: IntArray): IntArray {
         val out = IntArray(peaksUp.size)
         for (i in peaksUp.indices) {
-            val from = if (i == 0) max(0, peaksUp[i] - 600) else peaksUp[i - 1] + 1
+            val prev = if (i == 0) (peaksUp[i] - 600).coerceAtLeast(0) else peaksUp[i - 1]
+            val span = peaksUp[i] - prev
+            // Restrict the search to the last ~30 % of the gap (or last 0.4 s, whichever larger).
+            val from = (peaksUp[i] - (span * 0.35f).toInt())
+                .coerceAtLeast(prev + 1)
+                .coerceAtMost(peaksUp[i])
             var minIdx = peaksUp[i]
             var minVal = x[peaksUp[i]]
             var k = peaksUp[i] - 1

@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dk.nst.hrvmonitor.data.StateTag
 import dk.nst.hrvmonitor.ppg.HrvCalculator
+import dk.nst.hrvmonitor.ppg.PulseMorphology
 import dk.nst.hrvmonitor.ppg.SignalProcessor
 import dk.nst.hrvmonitor.ui.components.ReportSheet
 import dk.nst.hrvmonitor.ui.theme.Accent
@@ -193,7 +194,8 @@ private data class SessionEntry(
     val peakTimesSec: List<Float>,
     val sessionPath: String,
     val roi: MeasurementViewModel.RoiInfo?,
-    val tag: StateTag?
+    val tag: StateTag?,
+    val morphology: PulseMorphology.Result?
 ) {
     val formattedTimestamp: String
         get() {
@@ -223,7 +225,8 @@ private data class SessionEntry(
         sessionPath = sessionPath,
         roi = roi,
         spectralBpm = spectralBpm,
-        tag = tag
+        tag = tag,
+        morphology = morphology
     )
 }
 
@@ -290,7 +293,8 @@ private fun parseSummary(file: File, dirPath: String): SessionEntry? {
             peakTimesSec = peaks,
             sessionPath = dirPath,
             roi = roi,
-            tag = StateTag.fromKey(obj.optString("tag", null))
+            tag = StateTag.fromKey(obj.optString("tag", null)),
+            morphology = parseMorphology(obj.optJSONObject("morphology"))
         )
     } catch (_: Throwable) {
         null
@@ -300,4 +304,29 @@ private fun parseSummary(file: File, dirPath: String): SessionEntry? {
 private fun JSONObject.optNullableFloat(key: String): Float? {
     if (isNull(key)) return null
     return optDouble(key, Double.NaN).let { if (it.isNaN()) null else it.toFloat() }
+}
+
+private fun parseMorphology(m: JSONObject?): PulseMorphology.Result? {
+    if (m == null) return null
+    val avgArr = m.optJSONArray("averaged_beat") ?: return null
+    val timeArr = m.optJSONArray("averaged_beat_time_sec") ?: return null
+    val avg = FloatArray(avgArr.length()) { avgArr.optDouble(it).toFloat() }
+    val time = FloatArray(timeArr.length()) { timeArr.optDouble(it).toFloat() }
+    return PulseMorphology.Result(
+        isAvailable = true,
+        nBeats = m.optInt("n_beats"),
+        nBeatsTotal = m.optInt("n_beats"),
+        averagedBeat = avg,
+        averagedBeatTime = time,
+        footIdx = m.optInt("foot_idx", -1),
+        systolicPeakIdx = m.optInt("systolic_peak_idx", -1),
+        dicroticNotchIdx = m.optInt("dicrotic_notch_idx", -1),
+        diastolicPeakIdx = m.optInt("diastolic_peak_idx", -1),
+        crestTimeMs = m.optNullableFloat("crest_time_ms"),
+        reflectionIndex = m.optNullableFloat("reflection_index_pct"),
+        augmentationIndex = m.optNullableFloat("augmentation_index_pct"),
+        stiffnessIndexInv = m.optNullableFloat("stiffness_index_inv_s"),
+        agingIndex = m.optNullableFloat("aging_index"),
+        vascularAgeYears = m.optNullableFloat("vascular_age_years")
+    )
 }
