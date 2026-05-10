@@ -18,7 +18,14 @@ class SignalProcessor(
     private val highHz: Float = 4.0f    // ~240 BPM
 ) {
 
-    data class Sample(val tSec: Float, val raw: Float, val filtered: Float)
+    /** Per-sample container.
+     *  - [raw]: resampled red value, unaltered
+     *  - [filtered]: heart-rate-bandpassed (0.7–4 Hz) — used for peak detection / chart
+     *  - [morphology]: detrended-only (no bandpass), used for waveform-shape analysis.
+     *    The morphology signal preserves harmonics 5–15 Hz that the heart-rate
+     *    bandpass throws away — those harmonics are what the dicrotic notch lives in.
+     */
+    data class Sample(val tSec: Float, val raw: Float, val filtered: Float, val morphology: Float = 0f)
     data class Peak(val tSec: Float, val value: Float)
 
     data class Snapshot(
@@ -103,7 +110,8 @@ class SignalProcessor(
             samples += Sample(
                 tSec = tSec.first() + i * uniformDt,
                 raw = uniform[i],
-                filtered = filtered[i]
+                filtered = filtered[i],
+                morphology = detrended[i]
             )
         }
         val peaks = peakIdx.map {

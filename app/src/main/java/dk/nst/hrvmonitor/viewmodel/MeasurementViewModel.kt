@@ -356,16 +356,18 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             timedOut = timedOut
         )
 
-        // Pulse-wave morphology: spline-upsample the bandpassed signal, segment
-        // into beats, average them, and extract Crest Time, AIx, RI, AGI, vascular age.
+        // Pulse-wave morphology: feed the despiked-detrended (NOT bandpassed) signal so
+        // harmonics carrying the dicrotic notch are preserved. Peak indices come from
+        // the heart-rate-bandpassed peak detector (cycle markers); PulseMorphology
+        // snaps each one to the nearest local max on the morphology signal internally.
         val morphology = if (snap.samples.size > 32 && snap.peaks.size >= 4) {
-            val filtered = FloatArray(snap.samples.size) { snap.samples[it].filtered }
+            val morph = FloatArray(snap.samples.size) { snap.samples[it].morphology }
             val firstT = snap.samples.first().tSec
             val dt = (snap.samples.last().tSec - firstT) / (snap.samples.size - 1).coerceAtLeast(1)
             val peakIdx = if (dt > 0f)
                 snap.peaks.map { ((it.tSec - firstT) / dt).toInt().coerceIn(0, snap.samples.size - 1) }.toIntArray()
             else IntArray(0)
-            PulseMorphology.compute(filtered, snap.sampleRateHz, peakIdx)
+            PulseMorphology.compute(morph, snap.sampleRateHz, peakIdx)
         } else null
         val session = recorder.stop(
             durationSec = measureElapsed,

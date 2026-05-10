@@ -2,28 +2,22 @@ package dk.nst.hrvmonitor.ppg
 
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.roundToInt
 
 /**
  * Pulse-wave morphology analysis.
  *
- * Pipeline:
- *   1. Take the bandpassed signal + detected systolic peaks.
- *   2. Cubic-spline upsample to a higher rate (default 4× → 120 Hz from a 30 Hz capture).
- *   3. Locate the foot (local minimum) preceding each systolic peak. A "beat" runs
- *      foot[i] → foot[i+1].
- *   4. Resample each beat to a fixed grid (250 samples), aligned at the foot.
- *      Reject beats that are too short, too long, or have anomalous amplitude.
- *   5. Compute a robust average beat: median across aligned beats per sample.
- *   6. On the average beat, locate fiducial points using 1st & 2nd derivatives:
- *      foot · systolic peak · dicrotic notch · diastolic peak.
- *   7. Compute scalar metrics: Crest Time, Reflection Index, Augmentation Index,
- *      Stiffness Index proxy, and Takazawa's Aging Index (AGI) from SDPPG waves.
- *   8. Estimate vascular age from AGI using the Takazawa regression.
- *
- * All metrics are gated by the number of usable beats. If < [minValidBeats] beats
- * survive the quality filter, returns [Result.unavailable].
+ * v2 fixes (post-first-results review):
+ *   - Now operates on the **morphology signal** (despiked + detrended, no narrow
+ *     bandpass) so harmonics carrying the dicrotic notch (5–15 Hz) are preserved.
+ *     Previously we used the 0.7–4 Hz bandpass, which produced a sinusoid with no
+ *     real morphology and nonsensical fiducials.
+ *   - Sign convention: in raw red, blood arrival = lower value (more absorption).
+ *     We invert internally so the systolic event is a **positive peak**, matching
+ *     conventional PPG plots and the Takazawa SDPPG framework.
+ *   - Global systolic-peak search (not "first half"): the systolic peak typically
+ *     lives at 15–35 % of the beat duration, but a full-beat search is robust.
+ *   - Sanity gates on RI / AIx / AGI / vascular age: garbage is reported as null
+ *     instead of being passed through.
  */
 object PulseMorphology {
 
@@ -31,19 +25,17 @@ object PulseMorphology {
         val isAvailable: Boolean,
         val nBeats: Int,
         val nBeatsTotal: Int,
-        /** Averaged beat waveform on a fixed-length grid; index 0 == foot. */
         val averagedBeat: FloatArray,
-        /** Time axis (seconds) of [averagedBeat]; 0 at foot. */
         val averagedBeatTime: FloatArray,
         val footIdx: Int,
         val systolicPeakIdx: Int,
         val dicroticNotchIdx: Int,
         val diastolicPeakIdx: Int,
         val crestTimeMs: Float?,
-        val reflectionIndex: Float?,        // d/s × 100, 0..100
-        val augmentationIndex: Float?,      // (P2-P1)/P1 × 100, can be negative or positive
-        val stiffnessIndexInv: Float?,      // 1 / (t_diastolic - t_systolic) in 1/s
-        val agingIndex: Float?,             // Takazawa (b-c-d-e)/a, dimensionless
+        val reflectionIndex: Float?,
+        val augmentationIndex: Float?,
+        val stiffnessIndexInv: Float?,
+        val agingIndex: Float?,
         val vascularAgeYears: Float?
     ) {
         override fun equals(other: Any?): Boolean = this === other
@@ -51,51 +43,67 @@ object PulseMorphology {
 
         companion object {
             fun unavailable(nBeatsTotal: Int) = Result(
-                isAvailable = false,
-                nBeats = 0,
-                nBeatsTotal = nBeatsTotal,
-                averagedBeat = FloatArray(0),
-                averagedBeatTime = FloatArray(0),
-                footIdx = -1,
-                systolicPeakIdx = -1,
-                dicroticNotchIdx = -1,
-                diastolicPeakIdx = -1,
-                crestTimeMs = null,
-                reflectionIndex = null,
-                augmentationIndex = null,
-                stiffnessIndexInv = null,
-                agingIndex = null,
-                vascularAgeYears = null
+                isAvailable = false, nBeats = 0, nBeatsTotal = nBeatsTotal,
+                averagedBeat = FloatArray(0), averagedBeatTime = FloatArray(0),
+                footIdx = -1, systolicPeakIdx = -1, dicroticNotchIdx = -1, diastolicPeakIdx = -1,
+                crestTimeMs = null, reflectionIndex = null, augmentationIndex = null,
+                stiffnessIndexInv = null, agingIndex = null, vascularAgeYears = null
             )
         }
     }
 
     private const val UPSAMPLE = 4
     private const val BEAT_LEN = 250
-    private const val MIN_BEAT_S = 0.4f      // < 150 BPM
-    private const val MAX_BEAT_S = 1.6f      // > 37 BPM
+    private const val MIN_BEAT_S = 0.4f
+    private const val MAX_BEAT_S = 1.6f
     private const val MIN_VALID_BEATS = 20
 
+    /**
+     * @param morphSignal The detrended-but-not-bandpassed signal at [sampleRateHz].
+     *                    Sign as captured: lower value = blood present (systole).
+     *                    We invert internally.
+     * @param sampleRateHz Sample rate of [morphSignal].
+     * @param peakIndices Systolic-event indices into [morphSignal] (from peak detection
+     *                    on the heart-rate-bandpassed signal). These tell us *when*
+     *                    each beat happened.
+     */
     fun compute(
-        signalUniform: FloatArray,    // bandpassed signal, uniform sample rate fs
+        morphSignal: FloatArray,
         sampleRateHz: Float,
         peakIndices: IntArray
     ): Result {
-        if (signalUniform.size < 64 || peakIndices.size < 4) {
+        if (morphSignal.size < 64 || peakIndices.size < 4) {
             return Result.unavailable(peakIndices.size)
         }
 
-        // 1) Upsample to make foot/notch detection sub-sample precise.
-        val up = SplineInterp.upsample(signalUniform, UPSAMPLE)
+        // Invert: systole becomes a positive peak, matching conventional PPG sign.
+        val inverted = FloatArray(morphSignal.size) { -morphSignal[it] }
+
+        // Spline-upsample for sub-frame fiducial precision (literature-validated).
+        val up = SplineInterp.upsample(inverted, UPSAMPLE)
         val fsUp = sampleRateHz * UPSAMPLE
+        val peaksUpRaw = IntArray(peakIndices.size) {
+            (peakIndices[it] * UPSAMPLE).coerceIn(0, up.size - 1)
+        }
 
-        // Map original peak indices to upsampled grid.
-        val peaksUp = IntArray(peakIndices.size) { (peakIndices[it] * UPSAMPLE).coerceAtMost(up.size - 1) }
+        // The peak indices were found on the *bandpassed* signal — they're cycle markers
+        // but their exact sample position may not coincide with the morphology signal's
+        // local maximum. Snap each peak to the nearest local max within ±0.15 s on the
+        // upsampled morphology signal.
+        val snapWin = (0.15f * fsUp).toInt().coerceAtLeast(2)
+        val peaksUp = IntArray(peaksUpRaw.size) { i ->
+            val centre = peaksUpRaw[i]
+            val from = (centre - snapWin).coerceAtLeast(0)
+            val to = (centre + snapWin).coerceAtMost(up.size - 1)
+            var best = centre; var bestVal = up[centre]
+            for (k in from..to) if (up[k] > bestVal) { bestVal = up[k]; best = k }
+            best
+        }
 
-        // 2) Find foot (local minimum) before each peak.
+        // Locate feet (local minimum just before each systolic peak).
         val feet = locateFeet(up, peaksUp)
 
-        // 3) Slice beats foot[i]..foot[i+1] and resample to BEAT_LEN.
+        // Slice beats foot[i]..foot[i+1] and resample to a common length.
         val rawBeats = mutableListOf<FloatArray>()
         val beatDurationsSec = mutableListOf<Float>()
         for (i in 0 until feet.size - 1) {
@@ -105,75 +113,62 @@ object PulseMorphology {
             rawBeats += resampleSegment(up, a, b, BEAT_LEN)
             beatDurationsSec += durSec
         }
-        if (rawBeats.size < MIN_VALID_BEATS) {
-            return Result.unavailable(rawBeats.size)
-        }
+        if (rawBeats.size < MIN_VALID_BEATS) return Result.unavailable(rawBeats.size)
 
-        // 4) Reject amplitude outliers (>2 MAD from median peak height).
+        // Reject beats whose amplitude is far from the median (motion artifacts).
         val peakHeights = rawBeats.map { it.max() - it.min() }
-        val medAmp = peakHeights.sorted().let { it[it.size / 2] }
-        val mad = peakHeights.map { kotlin.math.abs(it - medAmp) }.sorted().let { it[it.size / 2] }.coerceAtLeast(0.001f)
-        val accepted = rawBeats.zip(peakHeights).filter { kotlin.math.abs(it.second - medAmp) <= 2.5f * mad }.map { it.first }
-        if (accepted.size < MIN_VALID_BEATS) {
-            return Result.unavailable(accepted.size)
-        }
+        val medAmp = peakHeights.sorted()[peakHeights.size / 2]
+        val mads = peakHeights.map { abs(it - medAmp) }.sorted()
+        val mad = mads[mads.size / 2].coerceAtLeast(0.001f)
+        val keptIndices = peakHeights.indices.filter { abs(peakHeights[it] - medAmp) <= 2.5f * mad }
+        if (keptIndices.size < MIN_VALID_BEATS) return Result.unavailable(keptIndices.size)
+        val accepted = keptIndices.map { rawBeats[it] }
+        val keptDurations = keptIndices.map { beatDurationsSec[it] }.sorted()
+        val medDur = keptDurations[keptDurations.size / 2]
 
-        // 5) Median across aligned beats per sample → robust average beat.
+        // Sample-wise median across aligned beats — robust to outliers, preserves shape.
         val avg = FloatArray(BEAT_LEN)
-        val sampleBucket = FloatArray(accepted.size)
+        val bucket = FloatArray(accepted.size)
         for (s in 0 until BEAT_LEN) {
-            for (i in accepted.indices) sampleBucket[i] = accepted[i][s]
-            sampleBucket.sort()
-            avg[s] = sampleBucket[sampleBucket.size / 2]
+            for (i in accepted.indices) bucket[i] = accepted[i][s]
+            bucket.sort()
+            avg[s] = bucket[bucket.size / 2]
         }
-        // Time axis: the average beat duration is the median of the durations of
-        // the *accepted* beats (we kept only beats that passed the amplitude filter,
-        // so use their median for the time axis).
-        val keptDurations = beatDurationsSec.zip(peakHeights)
-            .filter { kotlin.math.abs(it.second - medAmp) <= 2.5f * mad }
-            .map { it.first }
-        val medDur = keptDurations.sorted()[keptDurations.size / 2]
         val avgTime = FloatArray(BEAT_LEN) { it * medDur / (BEAT_LEN - 1) }
 
-        // 6) Fiducial points on the average beat.
-        val fiducials = locateFiducials(avg)
-        val footI = fiducials.foot
-        val sysI = fiducials.systolicPeak
-        val notchI = fiducials.dicroticNotch
-        val diaI = fiducials.diastolicPeak
+        // Fiducials on the averaged beat.
+        val fid = locateFiducials(avg)
 
-        // 7) Metrics.
-        val sysAmp = avg[sysI] - avg[footI]
-        val crestTimeMs = if (sysI > footI) (avgTime[sysI] - avgTime[footI]) * 1000f else null
+        // Compute metrics, gating each one against plausibility.
+        val sysAmp = avg[fid.systolicPeak] - avg[fid.foot]
+        val crestTimeMs = if (fid.systolicPeak > fid.foot)
+            (avgTime[fid.systolicPeak] - avgTime[fid.foot]) * 1000f else null
 
-        // Reflection Index — diastolic peak amp / systolic peak amp (× 100).
-        val ri = if (diaI > sysI && sysAmp > 1e-6f) {
-            val diaAmp = avg[diaI] - avg[footI]
-            (100f * diaAmp / sysAmp).coerceIn(0f, 200f)
+        val ri = if (fid.diastolicPeak > fid.systolicPeak && sysAmp > 1e-6f) {
+            val diaAmp = avg[fid.diastolicPeak] - avg[fid.foot]
+            val v = (100f * diaAmp / sysAmp)
+            // Real RI is typically 30–80 %. Anything > 100 % means we've mis-located peaks.
+            if (v in 5f..120f) v else null
         } else null
 
-        // Augmentation Index — (P2 - P1)/P1 × 100. P1 is systolic peak (forward wave),
-        // P2 is the inflection point at the dicrotic notch (reflected wave reference).
-        // Reported as a percentage; can be negative for younger/elastic vasculature.
-        val aix = if (notchI in (sysI + 1) until diaI && sysAmp > 1e-6f) {
-            val p1 = avg[sysI] - avg[footI]
-            val p2 = avg[diaI] - avg[footI]
-            (100f * (p2 - p1) / p1)
+        val aix = if (fid.dicroticNotch in (fid.systolicPeak + 1) until fid.diastolicPeak && sysAmp > 1e-6f) {
+            val p1 = avg[fid.systolicPeak] - avg[fid.foot]
+            val p2 = avg[fid.diastolicPeak] - avg[fid.foot]
+            val v = (100f * (p2 - p1) / p1)
+            // AIx is typically -30 %..+30 %; clamp anything beyond as an indication of
+            // failed fiducial detection.
+            if (v in -50f..50f) v else null
         } else null
 
-        // Stiffness Index proxy (we don't have subject height; use 1/Δt).
-        val si = if (diaI > sysI) {
-            val dt = (avgTime[diaI] - avgTime[sysI]).coerceAtLeast(1e-3f)
+        val si = if (fid.diastolicPeak > fid.systolicPeak) {
+            val dt = (avgTime[fid.diastolicPeak] - avgTime[fid.systolicPeak]).coerceAtLeast(1e-3f)
             1f / dt
         } else null
 
-        // 8) Takazawa Aging Index from SDPPG.
-        val (agi, abcde) = computeAgi(avg, sampleRateHz = (BEAT_LEN - 1) / medDur)
-
-        // 9) Vascular age — Takazawa et al. linear regression of AGI vs chronological age:
-        //    age ≈ 65 - 25 * AGI (rough fit from published data; 1990s cohorts).
-        //    Bounded to reasonable adult range.
-        val vascAge = agi?.let { (65f - 25f * it).coerceIn(18f, 90f) }
+        val (agi, _) = computeAgi(avg, fsAvgBeat = (BEAT_LEN - 1) / medDur)
+        // Vascular-age regression: only emit if AGI is in a plausible range. Outside the
+        // calibrated range the linear model becomes meaningless.
+        val vascAge = agi?.takeIf { it in -1.5f..1.5f }?.let { (65f - 25f * it).coerceIn(20f, 85f) }
 
         return Result(
             isAvailable = true,
@@ -181,10 +176,10 @@ object PulseMorphology {
             nBeatsTotal = peakIndices.size,
             averagedBeat = avg,
             averagedBeatTime = avgTime,
-            footIdx = footI,
-            systolicPeakIdx = sysI,
-            dicroticNotchIdx = notchI,
-            diastolicPeakIdx = diaI,
+            footIdx = fid.foot,
+            systolicPeakIdx = fid.systolicPeak,
+            dicroticNotchIdx = fid.dicroticNotch,
+            diastolicPeakIdx = fid.diastolicPeak,
             crestTimeMs = crestTimeMs,
             reflectionIndex = ri,
             augmentationIndex = aix,
@@ -194,7 +189,7 @@ object PulseMorphology {
         )
     }
 
-    /** For each peak, walk backward to the local minimum since the previous peak. */
+    /** Walk back from each peak to its local minimum since the previous peak. */
     private fun locateFeet(x: FloatArray, peaksUp: IntArray): IntArray {
         val out = IntArray(peaksUp.size)
         for (i in peaksUp.indices) {
@@ -211,7 +206,6 @@ object PulseMorphology {
         return out
     }
 
-    /** Linear-resample x[a..b] to a fixed-length array of [n] samples. */
     private fun resampleSegment(x: FloatArray, a: Int, b: Int, n: Int): FloatArray {
         val out = FloatArray(n)
         val span = (b - a).toFloat()
@@ -233,33 +227,34 @@ object PulseMorphology {
     )
 
     /**
-     * Find foot (start), systolic peak (global max), dicrotic notch (local min on
-     * descending limb), and diastolic peak (local max after notch).
+     * Foot, systolic peak (global max), dicrotic notch (local min on descending limb,
+     * 2nd-derivative method), diastolic peak (local max after notch).
      *
-     * The notch is detected by the **second-derivative method** (most-cited
-     * approach in the PPG literature, Takazawa-style): inside the systolic-peak
-     * → end window, find the most prominent positive peak in the 2nd derivative.
-     * That position corresponds to a strong upward inflection — the notch.
+     * The averaged beat is aligned at the foot (idx 0). The systolic peak is the
+     * **global** maximum of the beat; the dicrotic notch sits on the descending
+     * limb after it.
      */
     private fun locateFiducials(beat: FloatArray): Fiducials {
         val n = beat.size
-        val foot = 0  // we already aligned at the foot
 
-        // Systolic peak: global max in the first half.
-        var sysIdx = 0
-        var sysVal = Float.NEGATIVE_INFINITY
-        for (i in 0 until n / 2) if (beat[i] > sysVal) { sysVal = beat[i]; sysIdx = i }
+        // Global systolic-peak search.
+        var sysIdx = 0; var sysVal = Float.NEGATIVE_INFINITY
+        for (i in 0 until n) if (beat[i] > sysVal) { sysVal = beat[i]; sysIdx = i }
 
-        // Search dicrotic notch on the descending limb (sysIdx+10 .. n-30).
+        // Foot: lowest point in the first 15 % of the beat (we already aligned roughly,
+        // but sub-sample minor refinement helps).
+        val footEnd = (n * 0.15f).toInt().coerceAtLeast(1)
+        var footIdx = 0; var footVal = beat[0]
+        for (i in 0 until footEnd) if (beat[i] < footVal) { footVal = beat[i]; footIdx = i }
+
+        // Search dicrotic notch on the descending limb. Use the 2nd derivative —
+        // the strongest positive peak after sysIdx is the notch.
         val searchStart = (sysIdx + (n * 0.06f).toInt()).coerceAtMost(n - 4)
-        val searchEnd = (n - (n * 0.10f).toInt()).coerceAtLeast(searchStart + 4)
-
-        // Compute second derivative within the search range (centered diff).
+        val searchEnd = (n - (n * 0.05f).toInt()).coerceAtLeast(searchStart + 4)
         val d2 = FloatArray(n)
         for (i in 1 until n - 1) d2[i] = beat[i + 1] - 2f * beat[i] + beat[i - 1]
 
-        var notchIdx = -1
-        var bestProm = Float.NEGATIVE_INFINITY
+        var notchIdx = -1; var bestProm = Float.NEGATIVE_INFINITY
         for (i in searchStart + 1 until searchEnd - 1) {
             if (d2[i] > d2[i - 1] && d2[i] > d2[i + 1] && d2[i] > 0f) {
                 if (d2[i] > bestProm) { bestProm = d2[i]; notchIdx = i }
@@ -267,50 +262,35 @@ object PulseMorphology {
         }
         if (notchIdx < 0) notchIdx = (sysIdx + (n - sysIdx) / 3).coerceIn(searchStart, searchEnd - 1)
 
-        // Diastolic peak = local max between notch and end.
-        var diaIdx = notchIdx
-        var diaVal = beat[notchIdx]
+        // Diastolic peak: local max strictly after the notch.
+        var diaIdx = notchIdx + 1
+        var diaVal = beat[diaIdx.coerceAtMost(n - 1)]
         for (i in notchIdx + 1 until searchEnd) if (beat[i] > diaVal) { diaVal = beat[i]; diaIdx = i }
+        // If diastolic ended up before the notch (search collapsed), null it out.
+        if (diaIdx <= notchIdx) diaIdx = notchIdx
 
-        return Fiducials(foot, sysIdx, notchIdx, diaIdx)
+        return Fiducials(footIdx, sysIdx, notchIdx, diaIdx)
     }
 
-    /**
-     * Compute Takazawa's Aging Index from the second derivative of [beat].
-     * SDPPG has 5 named extrema in early-systole — a (positive), b (negative),
-     * c (positive small), d (negative small), e (positive at the dicrotic notch).
-     *
-     * AGI = (b − c − d − e) / a, where each letter is the **signed** amplitude
-     * of the corresponding wave on the SDPPG. Validated to correlate r ≈ 0.8
-     * with chronological age.
-     */
-    private fun computeAgi(beat: FloatArray, sampleRateHz: Float): Pair<Float?, FloatArray?> {
+    private fun computeAgi(beat: FloatArray, fsAvgBeat: Float): Pair<Float?, FloatArray?> {
         val n = beat.size
         if (n < 20) return null to null
-        // Normalise so that absolute amplitudes are scale-invariant.
         val rng = (beat.max() - beat.min()).coerceAtLeast(1e-6f)
         val norm = FloatArray(n) { (beat[it] - beat.min()) / rng }
 
-        // Second derivative.
         val d2 = FloatArray(n)
         for (i in 1 until n - 1) d2[i] = norm[i + 1] - 2f * norm[i] + norm[i - 1]
         d2[0] = d2[1]; d2[n - 1] = d2[n - 2]
 
-        // Find the 5 successive extrema in d2 within the first ~50 % of the beat
-        // (Takazawa's a/b/c/d/e all live in the systolic ejection phase).
         val limit = (n * 0.55f).toInt()
-        val signs = mutableListOf<Pair<Int, Float>>()  // (idx, signed amp)
+        val signs = mutableListOf<Pair<Int, Float>>()
         var lookingForMax = true
-        var lastIdx = 0
         for (i in 2 until limit - 2) {
             val left = d2[i - 1]; val mid = d2[i]; val right = d2[i + 1]
             val isMax = mid > left && mid >= right
             val isMin = mid < left && mid <= right
-            if (lookingForMax && isMax) {
-                signs += i to mid; lookingForMax = false; lastIdx = i
-            } else if (!lookingForMax && isMin) {
-                signs += i to mid; lookingForMax = true; lastIdx = i
-            }
+            if (lookingForMax && isMax) { signs += i to mid; lookingForMax = false }
+            else if (!lookingForMax && isMin) { signs += i to mid; lookingForMax = true }
             if (signs.size >= 5) break
         }
         if (signs.size < 5) return null to null
@@ -320,7 +300,7 @@ object PulseMorphology {
         val c = signs[2].second
         val d = signs[3].second
         val e = signs[4].second
-        if (kotlin.math.abs(a) < 1e-6f) return null to null
+        if (abs(a) < 1e-6f) return null to null
         val agi = (b - c - d - e) / a
         return agi.coerceIn(-3f, 3f) to floatArrayOf(a, b, c, d, e)
     }
