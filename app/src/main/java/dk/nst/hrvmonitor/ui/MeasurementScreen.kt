@@ -150,6 +150,13 @@ fun MeasurementScreen(
             onTagSelect = viewModel::setTagForLastSession
         )
     }
+    state.composite?.let { composite ->
+        CompositeReportSheet(
+            composite = composite,
+            onDismiss = viewModel::dismissReport,
+            onTagSelect = viewModel::setTagForLastSession
+        )
+    }
 }
 
 @Composable
@@ -191,9 +198,26 @@ private fun ContentLayout(
         )
         Spacer(Modifier.height(8.dp))
 
-        if (!state.isMeasuring) {
-            SiteSelector(state.site, viewModel::setSite)
-            Spacer(Modifier.height(8.dp))
+        when {
+            state.snapshotState == MeasurementViewModel.SnapshotState.Stage1DonePending -> {
+                SnapshotStage1DonePrompt(
+                    stage1 = state.snapshotStage1Report,
+                    onContinue = viewModel::continueSnapshotStage2,
+                    onCancel = viewModel::cancelSnapshot
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            !state.isMeasuring -> {
+                SiteSelector(state.site, viewModel::setSite)
+                Spacer(Modifier.height(8.dp))
+                SnapshotStartButton(onStart = viewModel::startCardiacSnapshot)
+                Spacer(Modifier.height(8.dp))
+            }
+            state.snapshotState == MeasurementViewModel.SnapshotState.Stage1Active ||
+                state.snapshotState == MeasurementViewModel.SnapshotState.Stage2Active -> {
+                SnapshotStageBanner(stage = state.snapshotState)
+                Spacer(Modifier.height(8.dp))
+            }
         }
 
         BpmHero(
@@ -273,6 +297,112 @@ private fun SiteSelector(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SnapshotStartButton(onStart: () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(SurfaceElev)
+            .clickable { onStart() }
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Column {
+            Text(
+                "Cardiac Snapshot — fingertip + forearm",
+                color = Color.White,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                "Best HR/HRV from fingertip, best morphology from forearm. Two measurements, one report.",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun SnapshotStage1DonePrompt(
+    stage1: MeasurementViewModel.Report?,
+    onContinue: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Accent.copy(alpha = 0.18f))
+            .padding(14.dp)
+    ) {
+        Text(
+            "Snapshot stage 1 complete",
+            color = Color.White,
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold)
+        )
+        Spacer(Modifier.height(4.dp))
+        if (stage1 != null) {
+            val bpm = stage1.metrics.bpm?.let { "%.0f BPM".format(it) } ?: "—"
+            val rmssd = stage1.metrics.rmssdMs?.let { "%.0f ms".format(it) } ?: "—"
+            Text(
+                "Fingertip: $bpm · RMSSD $rmssd",
+                color = Color.White,
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        Text(
+            "Now place your forearm volar side on the lens and flash. Use the heat-map during settle to find the optimal lateral spot, then hold steady.",
+            color = OnSurfaceMuted,
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp)
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(ForearmPulse)
+                    .clickable { onContinue() }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Continue to forearm", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            }
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(SurfaceElev)
+                    .clickable { onCancel() }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("Cancel", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SnapshotStageBanner(stage: MeasurementViewModel.SnapshotState) {
+    val isStage1 = stage == MeasurementViewModel.SnapshotState.Stage1Active
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (isStage1) Pulse.copy(alpha = 0.18f) else ForearmPulse.copy(alpha = 0.18f))
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Text(
+            if (isStage1) "Cardiac Snapshot · Stage 1 of 2 · fingertip"
+            else "Cardiac Snapshot · Stage 2 of 2 · forearm",
+            color = Color.White,
+            style = MaterialTheme.typography.labelMedium
+        )
     }
 }
 

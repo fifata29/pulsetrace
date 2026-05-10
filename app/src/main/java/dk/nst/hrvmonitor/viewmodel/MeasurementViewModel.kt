@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 /**
@@ -34,6 +35,11 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     /** Body site. Drives the channel used for the chart trace and morphology
      *  computation. Peak detection always runs on red regardless. */
     enum class Site { Fingertip, Forearm }
+
+    /** Cardiac Snapshot is a chained two-stage workflow: fingertip → forearm,
+     *  combining each site's strongest biomarkers into one composite report
+     *  (HR/HRV from fingertip + morphology from forearm). */
+    enum class SnapshotState { Inactive, Stage1Active, Stage1DonePending, Stage2Active, Done }
 
     data class UiState(
         val phase: Phase = Phase.Idle,
@@ -64,7 +70,13 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         // the ROI gets locked.
         val tileAc: FloatArray = FloatArray(GRID_COLS * GRID_ROWS),
         val bestTileRow: Int = -1,
-        val bestTileCol: Int = -1
+        val bestTileCol: Int = -1,
+        // Cardiac Snapshot state — when active, drives a chained two-stage flow
+        // (fingertip then forearm). [snapshotStage1Report] holds stage 1 between
+        // stages so [composite] can be built after stage 2 finalises.
+        val snapshotState: SnapshotState = SnapshotState.Inactive,
+        val snapshotStage1Report: Report? = null,
+        val composite: CompositeReport? = null
     )
 
     /** Bounding box (inclusive) of selected tiles, plus diagnostic info from selection. */
@@ -96,7 +108,22 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         val roi: RoiInfo?,
         val spectralBpm: Float = 0f,
         val tag: StateTag? = null,
-        val morphology: PulseMorphology.Result? = null
+        val morphology: PulseMorphology.Result? = null,
+        val site: Site = Site.Fingertip,
+        // True when peak-derived BPM and spectral BPM agree within ±20 %. False
+        // means the peak detector and spectral cross-check disagree by enough
+        // that the BPM number shouldn't be trusted; the UI surfaces a warning
+        // and downstream HRV metrics are similarly suspect.
+        val bpmConfident: Boolean = true
+    )
+
+    /** Composite of fingertip + forearm reports produced by the Cardiac Snapshot
+     *  workflow. Each metric is sourced from the site that's most reliable for
+     *  it: HR / HRV from fingertip (red, no morphology), morphology from
+     *  forearm (green, no saturation). */
+    data class CompositeReport(
+        val fingertip: Report,
+        val forearm: Report
     )
 
     private val processor = SignalProcessor(windowSeconds = 60f)
@@ -199,6 +226,45 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         _state.value = _state.value.copy(site = site)
         processor.setUseGreen(site == Site.Forearm)
         scoutChannelIsGreen = site == Site.Forearm
+    }
+
+    /** Begin a Cardiac Snapshot — stage 1 is fingertip, then user is prompted
+     *  to switch to forearm for stage 2, then a composite report is shown. */
+    fun startCardiacSnapshot() {
+        if (_state.value.isMeasuring) return
+        _state.value = _state.value.copy(
+            site = Site.Fingertip,
+            snapshotState = SnapshotState.Stage1Active,
+            snapshotStage1Report = null,
+            composite = null,
+            report = null
+        )
+        processor.setUseGreen(false)
+        scoutChannelIsGreen = false
+        start()
+    }
+
+    /** After stage 1 completes the user is prompted to reposition; this kicks
+     *  off stage 2 (forearm). */
+    fun continueSnapshotStage2() {
+        if (_state.value.snapshotState != SnapshotState.Stage1DonePending) return
+        _state.value = _state.value.copy(
+            site = Site.Forearm,
+            snapshotState = SnapshotState.Stage2Active,
+            phase = Phase.Idle
+        )
+        processor.setUseGreen(true)
+        scoutChannelIsGreen = true
+        start()
+    }
+
+    fun cancelSnapshot() {
+        if (_state.value.snapshotState == SnapshotState.Inactive) return
+        _state.value = _state.value.copy(
+            snapshotState = SnapshotState.Inactive,
+            snapshotStage1Report = null,
+            composite = null
+        )
     }
 
     private fun writeScoutRing(sample: TileGridAnalyzer.TileSample) {
@@ -358,7 +424,13 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun dismissReport() {
-        _state.value = _state.value.copy(report = null, phase = Phase.Idle)
+        _state.value = _state.value.copy(
+            report = null,
+            composite = null,
+            snapshotState = SnapshotState.Inactive,
+            snapshotStage1Report = null,
+            phase = Phase.Idle
+        )
     }
 
     /** Persist a state tag (Resting, Post-workout, etc.) to the just-recorded session. */
@@ -482,6 +554,18 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             displayChannel = displayChan
         )
 
+        // BPM confidence: peak BPM agrees with spectral BPM within ±20 %. The
+        // spectral check uses a tight 0.7-2.5 Hz scan window so this disagrees
+        // only when peak detection found a wrong rhythm (over-counted dicrotic
+        // notches, missed beats, etc.). When false, the UI surfaces a warning
+        // rather than reporting BPM/HRV as if they were trustworthy.
+        val bpmConfident = run {
+            val bpm = metrics.bpm
+            if (bpm == null || snap.spectralBpm <= 1f) false
+            else (abs(bpm - snap.spectralBpm) / bpm) <= 0.20f
+        }
+
+        val currentSite = _state.value.site
         val report = Report(
             durationSec = measureElapsed,
             goodSec = goodSec,
@@ -495,8 +579,39 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             sessionPath = session?.dir?.absolutePath,
             roi = _state.value.roi,
             spectralBpm = snap.spectralBpm,
-            morphology = morphology
+            morphology = morphology,
+            site = currentSite,
+            bpmConfident = bpmConfident
         )
+
+        // Snapshot routing — stage 1 result feeds into the composite; stage 2
+        // result triggers the composite report instead of the single-site one.
+        val snap1 = _state.value.snapshotStage1Report
+        val snapState = _state.value.snapshotState
+        val newSnapshotState: SnapshotState
+        val newStage1: Report?
+        val newComposite: CompositeReport?
+        val newReport: Report?
+        when (snapState) {
+            SnapshotState.Stage1Active -> {
+                newSnapshotState = SnapshotState.Stage1DonePending
+                newStage1 = report
+                newComposite = null
+                newReport = null            // suppress single-site report; show prompt
+            }
+            SnapshotState.Stage2Active -> {
+                newSnapshotState = SnapshotState.Done
+                newStage1 = null
+                newComposite = if (snap1 != null) CompositeReport(snap1, report) else null
+                newReport = null            // composite takes over
+            }
+            else -> {
+                newSnapshotState = SnapshotState.Inactive
+                newStage1 = null
+                newComposite = null
+                newReport = report
+            }
+        }
 
         _state.value = _state.value.copy(
             phase = Phase.Done,
@@ -508,7 +623,10 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             rrMs = snap.rrMs,
             peaks = snap.peaks,
             signal = snap.samples,
-            report = report
+            report = newReport,
+            snapshotState = newSnapshotState,
+            snapshotStage1Report = newStage1,
+            composite = newComposite
         )
     }
 

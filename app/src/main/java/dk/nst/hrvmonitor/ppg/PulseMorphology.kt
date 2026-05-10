@@ -294,14 +294,25 @@ object PulseMorphology {
         var msIdx = 1; var msVal = d1[1]
         for (i in 2 until upslopeEnd) if (d1[i] > msVal) { msVal = d1[i]; msIdx = i }
 
-        // Foot via tangent intersection. Baseline = smoothed[0]; project the
-        // tangent line backwards until it hits that baseline. Clamp to a sane
-        // pre-systolic range so we don't get a negative index on noisy beats.
+        // Foot via tangent intersection PLUS a local-min sanity floor.
+        // Tangent intersection: project the line through (msIdx, beat[msIdx])
+        // with slope d1[msIdx] backwards until it hits the pre-systolic baseline.
+        // This works cleanly on sharp, well-defined upstrokes — but on fingertip
+        // reflectance, where the systolic upstroke is broadened by sensor
+        // saturation, the projection can overshoot 60-100 ms earlier than the
+        // actual anatomical foot. So we ALSO find the local minimum in the
+        // first 25 % of the beat and use whichever of the two lands later.
         val baseline = smoothed[0]
-        val footIdx = if (msVal > 1e-6f) {
+        val tangentFoot = if (msVal > 1e-6f) {
             val t = msIdx - (smoothed[msIdx] - baseline) / msVal
             t.toInt().coerceIn(0, (msIdx - 1).coerceAtLeast(0))
         } else 0
+        val footSearchEnd = (n * 0.25f).toInt().coerceAtLeast(2)
+        var localMinFoot = 0; var localMinVal = smoothed[0]
+        for (i in 1 until footSearchEnd) {
+            if (smoothed[i] < localMinVal) { localMinVal = smoothed[i]; localMinFoot = i }
+        }
+        val footIdx = maxOf(tangentFoot, localMinFoot)
 
         // Systolic peak: first d1 zero-crossing (+ → −) after msIdx.
         var sysIdx = -1

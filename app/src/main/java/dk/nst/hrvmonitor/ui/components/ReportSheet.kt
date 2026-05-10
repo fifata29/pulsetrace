@@ -56,12 +56,50 @@ import kotlin.math.roundToInt
 
 private enum class Metric { Bpm, Rmssd, Sdnn, Pnn50, Quality, CrestTime, Aix, Ri, AGI, VascularAge }
 
+/**
+ * Cardiac Snapshot view — fingertip + forearm reports composed into one report
+ * that surfaces each biomarker from its most reliable site:
+ *   - HR / HRV (BPM, RMSSD, SDNN, pNN50) from the fingertip stage (red channel,
+ *     no saturation in the bandpass output, ERMA peak detection works cleanly).
+ *   - Pulse morphology (Crest Time, RI, AIx, AGI) from the forearm stage (green
+ *     channel, dicrotic notch is anatomically present, no red saturation).
+ * The signal chart and ROI image come from the forearm stage; the RR tachogram
+ * comes from the fingertip stage (since it's driven by the timing source).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CompositeReportSheet(
+    composite: MeasurementViewModel.CompositeReport,
+    onDismiss: () -> Unit,
+    onTagSelect: ((StateTag) -> Unit)? = null
+) {
+    // Merge: forearm carries the signal trace and morphology, fingertip carries
+    // the timing-based metrics. sessionPath stays on the forearm (= most recent
+    // session); both stages are still saved as their own session files on disk.
+    val merged = composite.forearm.copy(
+        metrics = composite.fingertip.metrics,
+        rrMs = composite.fingertip.rrMs,
+        peaks = composite.fingertip.peaks,
+        spectralBpm = composite.fingertip.spectralBpm,
+        bpmConfident = composite.fingertip.bpmConfident,
+        morphology = composite.forearm.morphology,
+        site = MeasurementViewModel.Site.Forearm
+    )
+    ReportSheet(
+        report = merged,
+        onDismiss = onDismiss,
+        onTagSelect = onTagSelect,
+        headerOverride = "Cardiac Snapshot — fingertip + forearm"
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReportSheet(
     report: MeasurementViewModel.Report,
     onDismiss: () -> Unit,
-    onTagSelect: ((StateTag) -> Unit)? = null
+    onTagSelect: ((StateTag) -> Unit)? = null,
+    headerOverride: String? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var explainer by remember { mutableStateOf<Metric?>(null) }
@@ -79,7 +117,8 @@ fun ReportSheet(
             score = score,
             onShowExplainer = { explainer = it },
             onTagSelect = onTagSelect,
-            onDone = onDismiss
+            onDone = onDismiss,
+            headerOverride = headerOverride
         )
     }
     explainer?.let {
@@ -93,7 +132,8 @@ private fun ReportContent(
     score: QualityScorer.Score,
     onShowExplainer: (Metric) -> Unit,
     onTagSelect: ((StateTag) -> Unit)?,
-    onDone: () -> Unit
+    onDone: () -> Unit,
+    headerOverride: String? = null
 ) {
     val scroll = rememberScrollState()
     Column(
@@ -105,8 +145,9 @@ private fun ReportContent(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    if (report.timedOut) "Recording incomplete" else "Recording complete",
-                    color = if (report.timedOut) Warn else Color.White,
+                    headerOverride
+                        ?: if (report.timedOut) "Recording incomplete" else "Recording complete",
+                    color = if (report.timedOut && headerOverride == null) Warn else Color.White,
                     style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold)
                 )
                 Text(
@@ -133,11 +174,12 @@ private fun ReportContent(
 
         InterpretationRow(
             label = "Heart rate",
-            tag = "BPM",
+            tag = if (report.bpmConfident) "BPM" else "BPM · low confidence",
             value = report.metrics.bpm?.roundToInt()?.toString() ?: "—",
             unit = "BPM",
-            interpretation = bpmInterpretation(report.metrics.bpm),
-            highlightColor = Pulse,
+            interpretation = if (report.bpmConfident) bpmInterpretation(report.metrics.bpm)
+                else "Peak detector and spectral cross-check disagree by more than 20 %. Take this BPM with skepticism and re-measure — the HRV numbers below inherit the same uncertainty.",
+            highlightColor = if (report.bpmConfident) Pulse else Color(0xFFFFC078),  // amber
             onInfo = { onShowExplainer(Metric.Bpm) }
         )
         Spacer(Modifier.height(8.dp))
