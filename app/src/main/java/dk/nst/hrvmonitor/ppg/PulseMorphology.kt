@@ -38,7 +38,24 @@ object PulseMorphology {
         val augmentationIndex: Float?,
         val stiffnessIndexInv: Float?,
         val agingIndex: Float?,
-        val vascularAgeYears: Float?
+        val vascularAgeYears: Float?,
+        // -------- Ventricular-function proxies (research, single-site PPG) ----
+        // Left Ventricular Ejection Time = foot → dicrotic notch interval. The
+        // dicrotic notch corresponds to aortic-valve closure, so this is the
+        // duration the LV is actively ejecting blood. Normal 250–350 ms at rest;
+        // shortens under low stroke volume or reduced contractility. Returned
+        // only when the notch is confidently located.
+        // Ref: Geddes 1984; Ahn et al. 2018 (LVET-from-PPG vs MRI, r≈0.77).
+        val lvetMs: Float?,
+        // Peak systolic upstroke rate normalised by systolic amplitude (units 1/s).
+        // Proxy for ventricular contractility (peripheral dP/dt). Higher = more
+        // forceful ejection. Site-dependent so use as a within-self trend metric.
+        val maxUpstrokePerSec: Float?,
+        // Beat-to-beat pulse amplitude coefficient of variation (%). Reflects
+        // stroke volume variability + respiratory amplitude modulation. Healthy
+        // resting typically 5–15 %; high values can indicate fluid status changes
+        // or irregular rhythm.
+        val pulseAmpVarPct: Float?
     ) {
         override fun equals(other: Any?): Boolean = this === other
         override fun hashCode(): Int = System.identityHashCode(this)
@@ -49,7 +66,8 @@ object PulseMorphology {
                 averagedBeat = FloatArray(0), averagedBeatTime = FloatArray(0),
                 footIdx = -1, systolicPeakIdx = -1, dicroticNotchIdx = -1, diastolicPeakIdx = -1,
                 crestTimeMs = null, reflectionIndex = null, augmentationIndex = null,
-                stiffnessIndexInv = null, agingIndex = null, vascularAgeYears = null
+                stiffnessIndexInv = null, agingIndex = null, vascularAgeYears = null,
+                lvetMs = null, maxUpstrokePerSec = null, pulseAmpVarPct = null
             )
         }
     }
@@ -186,6 +204,48 @@ object PulseMorphology {
         // calibrated range the linear model becomes meaningless.
         val vascAge = agi?.takeIf { it in -1.5f..1.5f }?.let { (65f - 25f * it).coerceIn(20f, 85f) }
 
+        // ----- Ventricular-function biomarkers (research, derived from PPG) -----
+        // LVET — foot → dicrotic notch. Only confident-notch beats give a real
+        // value; otherwise null. Tight plausibility window guards against the
+        // odd case where the notch lands too close to the foot.
+        val lvetMs: Float? = if (fid.notchConfident && fid.dicroticNotch > fid.foot) {
+            val v = (avgTime[fid.dicroticNotch] - avgTime[fid.foot]) * 1000f
+            if (v in 150f..500f) v else null
+        } else null
+
+        // Max upstroke rate. The derivative on the averaged beat already exists
+        // implicitly via consecutive samples; explicit pass here keeps the
+        // computation local to its consumer. Normalised by sysAmp so the metric
+        // is comparable across different signal amplitudes (1/s = "fraction of
+        // peak amplitude per second").
+        val maxUpstrokePerSec: Float? = if (fid.systolicPeak > fid.foot && sysAmp > 1e-6f) {
+            val dtUp = (avgTime[1] - avgTime[0]).coerceAtLeast(1e-4f)
+            var maxSlope = 0f
+            var i = fid.foot + 1
+            while (i <= fid.systolicPeak) {
+                val s = (avg[i] - avg[i - 1]) / dtUp
+                if (s > maxSlope) maxSlope = s
+                i++
+            }
+            if (maxSlope > 0f) (maxSlope / sysAmp) else null
+        } else null
+
+        // Per-beat pulse amplitude variability. Each accepted beat contributes
+        // its own (max − min) amplitude; we take the coefficient of variation.
+        val pulseAmpVarPct: Float? = if (accepted.size >= 5) {
+            val amps = FloatArray(accepted.size) { accepted[it].max() - accepted[it].min() }
+            var sum = 0.0
+            for (a in amps) sum += a
+            val mean = (sum / amps.size).toFloat()
+            if (mean > 1e-6f) {
+                var ss = 0.0
+                for (a in amps) { val d = a - mean; ss += d * d }
+                val std = kotlin.math.sqrt(ss / amps.size).toFloat()
+                val cv = 100f * std / mean
+                if (cv in 0f..120f) cv else null
+            } else null
+        } else null
+
         return Result(
             isAvailable = true,
             nBeats = accepted.size,
@@ -201,7 +261,10 @@ object PulseMorphology {
             augmentationIndex = aix,
             stiffnessIndexInv = si,
             agingIndex = agi,
-            vascularAgeYears = vascAge
+            vascularAgeYears = vascAge,
+            lvetMs = lvetMs,
+            maxUpstrokePerSec = maxUpstrokePerSec,
+            pulseAmpVarPct = pulseAmpVarPct
         )
     }
 

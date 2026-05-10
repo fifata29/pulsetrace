@@ -275,6 +275,38 @@ private fun ReportContent(
                 onInfo = { onShowExplainer(Metric.VascularAge) })
         }
 
+        // ------------ Ventricular function (research) -----------------------
+        if (report.morphology?.isAvailable == true) {
+            val m = report.morphology
+            val anyVent = m.lvetMs != null || m.maxUpstrokePerSec != null || m.pulseAmpVarPct != null
+            if (anyVent) {
+                Spacer(Modifier.height(18.dp))
+                Text(
+                    "Ventricular function (research)",
+                    color = OnSurfaceMuted,
+                    style = MaterialTheme.typography.labelLarge
+                )
+                Spacer(Modifier.height(6.dp))
+                MorphologyMetricRow("LVET",
+                    m.lvetMs?.let { "${it.toInt()}" } ?: "—",
+                    "ms",
+                    "Left ventricular ejection time — duration the LV is actively ejecting blood (foot to dicrotic notch). Normal 250–350 ms at rest; shorter values can reflect reduced contractility or low stroke volume. Site-dependent — use as within-self trend."
+                )
+                Spacer(Modifier.height(6.dp))
+                MorphologyMetricRow("Max upstroke",
+                    m.maxUpstrokePerSec?.let { "%.1f".format(it) } ?: "—",
+                    "1/s",
+                    "Peak rate of the systolic rise, normalised by pulse amplitude. Proxy for ventricular contractility (peripheral dP/dt). Higher = more forceful ejection. Within-self trend metric."
+                )
+                Spacer(Modifier.height(6.dp))
+                MorphologyMetricRow("Amplitude variability",
+                    m.pulseAmpVarPct?.let { "%.1f".format(it) } ?: "—",
+                    "%",
+                    "Coefficient of variation of beat-to-beat pulse amplitude. Reflects stroke-volume variability and respiratory amplitude modulation. Healthy resting typically 5–15 %; higher with irregular rhythm or large breaths."
+                )
+            }
+        }
+
         Spacer(Modifier.height(18.dp))
         Text(
             "Beat-to-beat intervals",

@@ -638,6 +638,11 @@ private fun parseMorphology(m: JSONObject?): PulseMorphology.Result? {
         augmentationIndex = m.optNullableFloat("augmentation_index_pct"),
         stiffnessIndexInv = m.optNullableFloat("stiffness_index_inv_s"),
         agingIndex = m.optNullableFloat("aging_index"),
-        vascularAgeYears = m.optNullableFloat("vascular_age_years")
+        vascularAgeYears = m.optNullableFloat("vascular_age_years"),
+        // Ventricular-function biomarkers — null in older sessions (recorded
+        // before this build); read defensively so historical reports still load.
+        lvetMs = m.optNullableFloat("lvet_ms"),
+        maxUpstrokePerSec = m.optNullableFloat("max_upstroke_per_sec"),
+        pulseAmpVarPct = m.optNullableFloat("pulse_amp_variation_pct")
     )
 }

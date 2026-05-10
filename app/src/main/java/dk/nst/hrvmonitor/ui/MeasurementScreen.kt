@@ -67,11 +67,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dk.nst.hrvmonitor.ui.components.BpmHero
+import dk.nst.hrvmonitor.ui.components.CompositeReportSheet
 import dk.nst.hrvmonitor.ui.components.HrvMetricsRow
 import dk.nst.hrvmonitor.ui.components.InlineBreathingPacer
 import dk.nst.hrvmonitor.ui.components.QualityBar
