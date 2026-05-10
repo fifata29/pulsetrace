@@ -37,7 +37,9 @@ import dk.nst.hrvmonitor.ui.theme.SurfaceElev
 fun SignalChart(
     samples: List<SignalProcessor.Sample>,
     peaks: List<SignalProcessor.Peak>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    lineColor: Color = Pulse,
+    lineColorSoft: Color = PulseSoft
 ) {
     Box(
         modifier
@@ -126,7 +128,7 @@ fun SignalChart(
             }
             drawPath(
                 path = filtPath,
-                color = Pulse,
+                color = lineColor,
                 style = Stroke(width = 3f, cap = StrokeCap.Round)
             )
 
@@ -134,8 +136,8 @@ fun SignalChart(
             for (p in peaks) {
                 val x = w * ((p.tSec - tStart) / tSpan)
                 val y = h - h * ((p.value - minF) / ySpan)
-                drawCircle(PulseSoft, radius = 5f, center = Offset(x, y))
-                drawCircle(Pulse, radius = 3f, center = Offset(x, y))
+                drawCircle(lineColorSoft, radius = 5f, center = Offset(x, y))
+                drawCircle(lineColor, radius = 3f, center = Offset(x, y))
             }
         }
     }

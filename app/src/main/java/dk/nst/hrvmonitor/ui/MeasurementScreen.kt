@@ -21,6 +21,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -77,8 +78,11 @@ import dk.nst.hrvmonitor.ui.components.QualityBar
 import dk.nst.hrvmonitor.ui.components.ReportSheet
 import dk.nst.hrvmonitor.ui.components.SignalChart
 import dk.nst.hrvmonitor.ui.theme.Accent
+import dk.nst.hrvmonitor.ui.theme.ForearmPulse
+import dk.nst.hrvmonitor.ui.theme.ForearmPulseSoft
 import dk.nst.hrvmonitor.ui.theme.OnSurfaceMuted
 import dk.nst.hrvmonitor.ui.theme.Pulse
+import dk.nst.hrvmonitor.ui.theme.PulseSoft
 import dk.nst.hrvmonitor.ui.theme.SurfaceDark
 import dk.nst.hrvmonitor.ui.theme.SurfaceElev
 import dk.nst.hrvmonitor.viewmodel.MeasurementViewModel
@@ -183,6 +187,11 @@ private fun ContentLayout(
         )
         Spacer(Modifier.height(8.dp))
 
+        if (!state.isMeasuring) {
+            SiteSelector(state.site, viewModel::setSite)
+            Spacer(Modifier.height(8.dp))
+        }
+
         BpmHero(
             bpm = state.metrics.bpm,
             phase = state.phase,
@@ -201,10 +210,13 @@ private fun ContentLayout(
         QualityBar(coverage = state.coverage, sampleRateHz = state.sampleRateHz)
         Spacer(Modifier.height(8.dp))
 
+        val isForearm = state.site == MeasurementViewModel.Site.Forearm
         SignalChart(
             samples = state.signal,
             peaks = state.peaks,
-            modifier = Modifier.weight(1f, fill = true)
+            modifier = Modifier.weight(1f, fill = true),
+            lineColor = if (isForearm) ForearmPulse else Pulse,
+            lineColorSoft = if (isForearm) ForearmPulseSoft else PulseSoft
         )
         Spacer(Modifier.height(8.dp))
 
@@ -213,6 +225,50 @@ private fun ContentLayout(
             sdnn = state.metrics.sdnnMs,
             pnn50 = state.metrics.pnn50
         )
+    }
+}
+
+@Composable
+private fun SiteSelector(
+    selected: MeasurementViewModel.Site,
+    onPick: (MeasurementViewModel.Site) -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Text(
+            "Site",
+            color = OnSurfaceMuted,
+            style = MaterialTheme.typography.labelSmall
+        )
+        Spacer(Modifier.height(4.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            for (s in MeasurementViewModel.Site.values()) {
+                val pick = (s == selected)
+                val chipColor = if (pick) {
+                    if (s == MeasurementViewModel.Site.Forearm) ForearmPulse else Pulse
+                } else SurfaceElev
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(chipColor)
+                        .clickable { onPick(s) }
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        when (s) {
+                            MeasurementViewModel.Site.Fingertip -> "Fingertip · red channel"
+                            MeasurementViewModel.Site.Forearm -> "Forearm · green channel"
+                        },
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+        }
     }
 }
 

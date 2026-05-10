@@ -36,6 +36,7 @@ class SessionRecorder(private val appContext: Context) {
     data class SampleRow(
         val tNs: Long,
         val red: Float,
+        val green: Float,
         val luma: Float,
         val coverage: Float
     )
@@ -52,7 +53,7 @@ class SessionRecorder(private val appContext: Context) {
     private var current: Session? = null
     private var samplesWritten: Long = 0
 
-    fun start(): Session {
+    fun start(site: String = "fingertip", displayChannel: String = "R"): Session {
         finishWriterIfActive()
         val ts = SimpleDateFormat("yyyy-MM-dd'T'HH-mm-ss", Locale.US).apply {
             timeZone = TimeZone.getDefault()
@@ -72,9 +73,12 @@ class SessionRecorder(private val appContext: Context) {
                 w.write("# session_id: $ts\n")
                 w.write("# device: ${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.SDK_INT})\n")
                 w.write("# started_at: ${session.startedAt}\n")
-                w.write("timestamp_ns,red,luma,coverage\n")
+                w.write("# site: $site\n")
+                w.write("# display_channel: $displayChannel\n")
+                w.write("timestamp_ns,red,green,luma,coverage\n")
                 sampleFlow.collect { s ->
                     w.write("${s.tNs},${"%.3f".format(Locale.US, s.red)}," +
+                        "${"%.3f".format(Locale.US, s.green)}," +
                         "${"%.3f".format(Locale.US, s.luma)}," +
                         "${"%.4f".format(Locale.US, s.coverage)}\n")
                     samplesWritten++
@@ -82,7 +86,7 @@ class SessionRecorder(private val appContext: Context) {
                 }
             }
         }
-        Log.i(TAG, "Session started at ${session.dir.absolutePath}")
+        Log.i(TAG, "Session started at ${session.dir.absolutePath} ($site / $displayChannel)")
         return session
     }
 
@@ -126,7 +130,9 @@ class SessionRecorder(private val appContext: Context) {
         timedOut: Boolean = false,
         spectralBpm: Float = 0f,
         qualityScore: QualityScorer.Score? = null,
-        morphology: PulseMorphology.Result? = null
+        morphology: PulseMorphology.Result? = null,
+        site: String = "fingertip",
+        displayChannel: String = "R"
     ): Session? {
         val session = current ?: return null
         finishWriterIfActive()
@@ -138,7 +144,7 @@ class SessionRecorder(private val appContext: Context) {
                         session, durationSec, sampleRateHz, coverage,
                         peaks, rrMs, metrics, samplesWritten,
                         roi, goodSec, targetGoodSec, timedOut, spectralBpm,
-                        qualityScore, morphology
+                        qualityScore, morphology, site, displayChannel
                     ))
                 }
                 Log.i(TAG, "Summary written to ${session.summaryJson.absolutePath}")
@@ -170,11 +176,15 @@ class SessionRecorder(private val appContext: Context) {
         timedOut: Boolean,
         spectralBpm: Float,
         qualityScore: QualityScorer.Score?,
-        morphology: PulseMorphology.Result?
+        morphology: PulseMorphology.Result?,
+        site: String,
+        displayChannel: String
     ): String = buildString {
         append("{\n")
         append("  \"session_id\": \"${s.dir.name}\",\n")
         append("  \"started_at\": ${s.startedAt},\n")
+        append("  \"site\": \"$site\",\n")
+        append("  \"display_channel\": \"$displayChannel\",\n")
         append("  \"duration_sec\": ${"%.3f".format(Locale.US, durationSec)},\n")
         append("  \"good_sec\": ${"%.3f".format(Locale.US, goodSec)},\n")
         append("  \"target_good_sec\": ${"%.3f".format(Locale.US, targetGoodSec)},\n")

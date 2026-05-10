@@ -6,11 +6,18 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 
 /**
- * Frame analyzer that splits the frame into a [gridCols] × [gridRows] grid and emits both
- * mean red (R = Y + 1.402·(V−128)) AND mean luma per tile. Used by:
+ * Frame analyzer that splits the frame into a [gridCols] × [gridRows] grid and emits
+ * mean red, mean green, AND mean luma per tile. R/G are reconstructed from the YUV
+ * planes via BT.601:
+ *   R = Y + 1.402·(V − 128)
+ *   G = Y − 0.344·(U − 128) − 0.714·(V − 128)
+ * Used by:
  *   - calibration mode (records full grid for offline analysis)
  *   - measurement mode phase 1 (per-tile pulse search to pick the optimal ROI)
  *   - measurement mode phase 2 (averaging the chosen tiles to feed the SignalProcessor)
+ *
+ * Green is needed for forearm/wrist mode where reflectance morphology is much
+ * cleaner on G than R (no saturation, superficial-vessel arterial pulse).
  */
 class TileGridAnalyzer(
     val gridCols: Int = 16,
@@ -19,12 +26,13 @@ class TileGridAnalyzer(
 ) : ImageAnalysis.Analyzer {
 
     /**
-     * One frame's tile grid. [tilesR] and [tilesY] are row-major:
+     * One frame's tile grid. All FloatArrays are row-major:
      * index = row * gridCols + col, length = gridCols * gridRows.
      */
     data class TileSample(
         val timestampNs: Long,
         val tilesR: FloatArray,
+        val tilesG: FloatArray,
         val tilesY: FloatArray,
         val frameWidth: Int,
         val frameHeight: Int,
@@ -35,9 +43,8 @@ class TileGridAnalyzer(
         override fun hashCode(): Int = System.identityHashCode(this)
     }
 
-    // Reusable byte buffers — direct ByteBuffer.get(idx) is a JNI call per byte;
-    // bulk-copying the plane into a Java byte[] once per frame is ~10× faster.
     private var yScratch: ByteArray = ByteArray(0)
+    private var uScratch: ByteArray = ByteArray(0)
     private var vScratch: ByteArray = ByteArray(0)
 
     override fun analyze(image: ImageProxy) {
@@ -53,33 +60,43 @@ class TileGridAnalyzer(
             if (tw < 4 || th < 4) return
 
             val yPlane = image.planes[0]
+            val uPlane = image.planes[1]
             val vPlane = image.planes[2]
             val yBuf = yPlane.buffer
+            val uBuf = uPlane.buffer
             val vBuf = vPlane.buffer
 
             val yLen = yBuf.remaining()
+            val uLen = uBuf.remaining()
             val vLen = vBuf.remaining()
             if (yScratch.size < yLen) yScratch = ByteArray(yLen)
+            if (uScratch.size < uLen) uScratch = ByteArray(uLen)
             if (vScratch.size < vLen) vScratch = ByteArray(vLen)
             yBuf.position(0); yBuf.get(yScratch, 0, yLen)
+            uBuf.position(0); uBuf.get(uScratch, 0, uLen)
             vBuf.position(0); vBuf.get(vScratch, 0, vLen)
 
             val outR = FloatArray(gridCols * gridRows)
+            val outG = FloatArray(gridCols * gridRows)
             val outY = FloatArray(gridCols * gridRows)
             val yPixels = (tw * th).toFloat()
-            val vPixels = ((tw / 2) * (th / 2)).toFloat().coerceAtLeast(1f)
+            val uvPixels = ((tw / 2) * (th / 2)).toFloat().coerceAtLeast(1f)
 
             for (row in 0 until gridRows) {
                 for (col in 0 until gridCols) {
                     val x = col * tileW
                     val y = row * tileH
                     val ySum = sumArray(yScratch, yLen, yPlane.rowStride, yPlane.pixelStride, x, y, tw, th)
+                    val uSum = sumArray(uScratch, uLen, uPlane.rowStride, uPlane.pixelStride, x / 2, y / 2, tw / 2, th / 2)
                     val vSum = sumArray(vScratch, vLen, vPlane.rowStride, vPlane.pixelStride, x / 2, y / 2, tw / 2, th / 2)
                     val meanY = if (yPixels > 0f) ySum / yPixels else 0f
-                    val meanV = vSum / vPixels
+                    val meanU = uSum / uvPixels
+                    val meanV = vSum / uvPixels
                     val red = (meanY + 1.402f * (meanV - 128f)).coerceIn(0f, 255f)
+                    val green = (meanY - 0.344f * (meanU - 128f) - 0.714f * (meanV - 128f)).coerceIn(0f, 255f)
                     val idx = row * gridCols + col
                     outR[idx] = red
+                    outG[idx] = green
                     outY[idx] = meanY
                 }
             }
@@ -88,6 +105,7 @@ class TileGridAnalyzer(
                 TileSample(
                     timestampNs = System.nanoTime(),
                     tilesR = outR,
+                    tilesG = outG,
                     tilesY = outY,
                     frameWidth = width,
                     frameHeight = height,

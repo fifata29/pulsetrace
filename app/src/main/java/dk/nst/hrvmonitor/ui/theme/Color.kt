@@ -10,6 +10,10 @@ val OnSurfaceMuted = Color(0xFF8A93A8)
 
 val Pulse = Color(0xFFFF4D6D)
 val PulseSoft = Color(0xFFFF8FA3)
+// Forearm-mode pulse line (green channel). Picked to match the green chip in
+// Raw Mode so the colour-coding stays consistent across screens.
+val ForearmPulse = Color(0xFF66BB6A)
+val ForearmPulseSoft = Color(0xFFA5D6A7)
 val Accent = Color(0xFF7CC6FE)
 val AccentSoft = Color(0xFFB6E0FF)
 val Good = Color(0xFF6FE7B1)

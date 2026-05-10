@@ -9,6 +9,12 @@ import kotlin.math.sqrt
  * Streaming PPG processor. Holds a rolling buffer of timestamped raw samples,
  * applies detrending + bandpass filtering, and detects systolic peaks → RR intervals.
  *
+ * Each frame contributes BOTH red and green tile averages. Peak detection
+ * (cycle timing) always runs on the red-channel bandpass — proven reliable on
+ * fingertip and forearm alike. The chart-displayed signal and the morphology
+ * stream switch between R and G via [setUseGreen]: fingertip uses R, forearm
+ * uses G (cleaner pulse shape from superficial vessels, no saturation).
+ *
  * Sample rate is estimated continuously from inter-frame timing because CameraX
  * cannot guarantee a fixed fps across devices.
  */
@@ -19,11 +25,10 @@ class SignalProcessor(
 ) {
 
     /** Per-sample container.
-     *  - [raw]: resampled red value, unaltered
-     *  - [filtered]: heart-rate-bandpassed (0.7–4 Hz) — used for peak detection / chart
-     *  - [morphology]: detrended-only (no bandpass), used for waveform-shape analysis.
-     *    The morphology signal preserves harmonics 5–15 Hz that the heart-rate
-     *    bandpass throws away — those harmonics are what the dicrotic notch lives in.
+     *  - [raw]: resampled value of the displayed channel (R for fingertip, G for forearm)
+     *  - [filtered]: heart-rate-bandpassed (0.7–4 Hz) of the displayed channel; rendered as the chart line
+     *  - [morphology]: detrended-only (no bandpass) of the displayed channel; preserves
+     *    5–15 Hz harmonics that carry the dicrotic notch / diastolic peak.
      */
     data class Sample(val tSec: Float, val raw: Float, val filtered: Float, val morphology: Float = 0f)
     data class Peak(val tSec: Float, val value: Float)
@@ -32,22 +37,27 @@ class SignalProcessor(
         val sampleRateHz: Float,
         val samples: List<Sample>,
         val peaks: List<Peak>,
-        val rrMs: List<Float>,        // RR intervals in milliseconds, oldest first
-        val coverage: Float,           // last-known fingertip coverage
-        val spectralBpm: Float = 0f    // dominant-frequency BPM as an independent sanity check
+        val rrMs: List<Float>,
+        val coverage: Float,
+        val spectralBpm: Float = 0f
     )
 
     private val raw = ArrayDeque<TimedSample>()
     private var lastCoverage = 0f
+    @Volatile private var useGreen: Boolean = false
 
     fun reset() {
         raw.clear()
         lastCoverage = 0f
     }
 
-    fun addSample(timestampNs: Long, redValue: Float, coverage: Float) {
+    /** Selects which colour channel feeds the displayed/morphology signal. Peak
+     *  detection is unaffected — it always uses red for timing accuracy. */
+    fun setUseGreen(on: Boolean) { useGreen = on }
+
+    fun addSample(timestampNs: Long, redValue: Float, greenValue: Float, coverage: Float) {
         lastCoverage = coverage
-        raw.addLast(TimedSample(timestampNs, redValue))
+        raw.addLast(TimedSample(timestampNs, redValue, greenValue))
 
         val cutoffNs = timestampNs - (windowSeconds * 1_000_000_000L).toLong()
         while (raw.isNotEmpty() && raw.first().tNs < cutoffNs) {
@@ -64,58 +74,67 @@ class SignalProcessor(
         val t0 = raw.first().tNs
         val tSec = FloatArray(n) { (raw[it].tNs - t0) / 1e9f }
         val redArr = FloatArray(n) { raw[it].red }
+        val greenArr = FloatArray(n) { raw[it].green }
 
         val durSec = tSec.last() - tSec.first()
         val fs = if (durSec > 0f) (n - 1) / durSec else 30f
 
-        // Resample to a uniform grid for filtering (linear interpolation).
+        // Resample to a uniform grid for filtering (linear interpolation). Both
+        // channels share the same time grid so peak indices found in one map
+        // identically into the other.
         val uniformN = (durSec * fs).toInt().coerceAtLeast(16)
         val uniformDt = durSec / (uniformN - 1)
-        val uniform = FloatArray(uniformN)
+        val uniformR = FloatArray(uniformN)
+        val uniformG = FloatArray(uniformN)
         var idx = 0
         for (i in 0 until uniformN) {
             val t = tSec.first() + i * uniformDt
             while (idx < n - 2 && tSec[idx + 1] < t) idx++
             val t1 = tSec[idx]; val t2 = tSec[idx + 1]
             val a = if (t2 > t1) ((t - t1) / (t2 - t1)).coerceIn(0f, 1f) else 0f
-            uniform[i] = redArr[idx] * (1f - a) + redArr[idx + 1] * a
+            uniformR[i] = redArr[idx] * (1f - a) + redArr[idx + 1] * a
+            uniformG[i] = greenArr[idx] * (1f - a) + greenArr[idx + 1] * a
         }
 
-        // 5-point median filter — kills single-sample motion spikes before they get
-        // amplified by the bandpass and create spurious peaks. Trivial cost.
-        val despiked = medianFilter5(uniform)
+        val despikedR = medianFilter5(uniformR)
+        val despikedG = medianFilter5(uniformG)
 
-        // Detrend with moving average (~1.5 s).
         val maWin = (1.5f * fs).toInt().coerceAtLeast(5)
-        val detrended = movingAverageDetrend(despiked, maWin)
+        val detrendedR = movingAverageDetrend(despikedR, maWin)
+        val detrendedG = movingAverageDetrend(despikedG, maWin)
 
-        // Bandpass via cascaded biquads.
-        val filtered = butterworthBandpass(detrended, fs, lowHz, highHz)
+        val filteredR = butterworthBandpass(detrendedR, fs, lowHz, highHz)
+        val filteredG = butterworthBandpass(detrendedG, fs, lowHz, highHz)
 
-        // Edge-trim peak detection: filtfilt rings at both signal boundaries.
-        // Discarding ~1.5 s on each end removes those bogus spikes that previously
-        // contaminated the very first and last RR intervals.
+        // Peak detection: ALWAYS on red bandpass. The dicrotic notch on green is
+        // strong enough to register as a second peak per cycle (RPD's valley
+        // pairing helps but not always); red gives a cleaner cycle marker stream.
         val edgeTrim = (1.5f * fs).toInt().coerceAtLeast(8).coerceAtMost(uniformN / 3)
         val safeStart = edgeTrim
         val safeEnd = uniformN - edgeTrim
         val peakIdx = if (safeEnd > safeStart + 4) {
-            findPeaks(filtered, fs, minSeparationSec = 0.35f, fromIdx = safeStart, toIdx = safeEnd)
+            findPeaks(filteredR, fs, minSeparationSec = 0.35f, fromIdx = safeStart, toIdx = safeEnd)
         } else IntArray(0)
 
-        // Spectral BPM as a sanity check, computed independently from peak detection.
-        val spectralBpm = dominantBpm(filtered, fs, lowHz, highHz)
+        val displayedFiltered = if (useGreen) filteredG else filteredR
+        val displayedRaw = if (useGreen) uniformG else uniformR
+        val displayedMorphology = if (useGreen) detrendedG else detrendedR
+
+        val spectralBpm = dominantBpm(filteredR, fs, lowHz, highHz)
 
         val samples = ArrayList<Sample>(uniformN)
         for (i in 0 until uniformN) {
             samples += Sample(
                 tSec = tSec.first() + i * uniformDt,
-                raw = uniform[i],
-                filtered = filtered[i],
-                morphology = detrended[i]
+                raw = displayedRaw[i],
+                filtered = displayedFiltered[i],
+                morphology = displayedMorphology[i]
             )
         }
+        // Peak times come from R, but value is mapped to the displayed channel
+        // so the peak dots sit on the visible line in the chart.
         val peaks = peakIdx.map {
-            Peak(tSec = samples[it].tSec, value = filtered[it])
+            Peak(tSec = samples[it].tSec, value = displayedFiltered[it])
         }
 
         val rr = ArrayList<Float>(peaks.size)
@@ -147,7 +166,7 @@ class SignalProcessor(
         return bestF * 60f
     }
 
-    private data class TimedSample(val tNs: Long, val red: Float)
+    private data class TimedSample(val tNs: Long, val red: Float, val green: Float)
 
     /** 5-point median filter — robust to isolated motion spikes. */
     private fun medianFilter5(x: FloatArray): FloatArray {

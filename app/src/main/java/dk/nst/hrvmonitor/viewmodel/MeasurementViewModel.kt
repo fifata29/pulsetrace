@@ -30,9 +30,14 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
 
     enum class Phase { Idle, Settling, Searching, Measuring, Done }
 
+    /** Body site. Drives the channel used for the chart trace and morphology
+     *  computation. Peak detection always runs on red regardless. */
+    enum class Site { Fingertip, Forearm }
+
     data class UiState(
         val phase: Phase = Phase.Idle,
         val isMeasuring: Boolean = false,                // = phase ∈ {Settling, Searching, Measuring}
+        val site: Site = Site.Fingertip,
         val targetGoodSec: Float = TARGET_GOOD_SEC,
         val targetSearchSec: Float = SEARCH_SEC,
         val targetSettleSec: Float = SETTLE_SEC,
@@ -129,15 +134,17 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             Phase.Measuring -> {
                 val tiles = roiTiles
                 if (tiles.isEmpty()) return@TileGridAnalyzer
-                var sumR = 0f; var sumY = 0f; var n = 0
+                var sumR = 0f; var sumG = 0f; var sumY = 0f; var n = 0
                 for (idx in tiles) {
                     val r = sample.tilesR.getOrNull(idx) ?: continue
+                    val g = sample.tilesG.getOrNull(idx) ?: continue
                     val y = sample.tilesY.getOrNull(idx) ?: continue
                     if (r >= 254f) continue
-                    sumR += r; sumY += y; n++
+                    sumR += r; sumG += g; sumY += y; n++
                 }
                 if (n == 0) return@TileGridAnalyzer
                 val red = sumR / n
+                val green = sumG / n
                 val luma = sumY / n
 
                 // Coverage = current luma as a fraction of the phase-1 baseline.
@@ -148,7 +155,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
 
                 recorder.appendSample(
                     SessionRecorder.SampleRow(
-                        tNs = sample.timestampNs, red = red, luma = luma, coverage = latestCoverage
+                        tNs = sample.timestampNs, red = red, green = green,
+                        luma = luma, coverage = latestCoverage
                     )
                 )
 
@@ -158,7 +166,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
                     val gap = ts - lastGoodTNs
                     if (lastGoodTNs > 0L && gap in 1L..MAX_GOOD_GAP_NS) goodNs += gap
                     lastGoodTNs = ts
-                    processor.addSample(ts, red, latestCoverage)
+                    processor.addSample(ts, red, green, latestCoverage)
                 } else {
                     lastGoodTNs = 0L
                 }
@@ -167,9 +175,17 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun setSite(site: Site) {
+        if (_state.value.isMeasuring) return
+        _state.value = _state.value.copy(site = site)
+        processor.setUseGreen(site == Site.Forearm)
+    }
+
     fun start() {
         if (_state.value.phase != Phase.Idle && _state.value.phase != Phase.Done) return
+        val currentSite = _state.value.site
         processor.reset()
+        processor.setUseGreen(currentSite == Site.Forearm)
         startNs = System.nanoTime()
         measureStartNs = 0L
         goodNs = 0L
@@ -181,6 +197,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
 
         _state.value = UiState(
             phase = Phase.Settling,
+            site = currentSite,
             isMeasuring = true
         )
 
@@ -309,8 +326,12 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         roiTiles = result.tileIndices
         baselineLuma = result.baselineLuma
         lumaThreshold = (result.baselineLuma * GOOD_LUMA_FRACTION).coerceAtLeast(15f)
-        // Open a recording session now that we know the ROI.
-        recorder.start()
+        // Open a recording session now that we know the ROI. Site + display
+        // channel are written to the CSV header so analysis tools can branch
+        // correctly when replaying old vs new sessions.
+        val site = _state.value.site
+        val displayChan = if (site == Site.Forearm) "G" else "R"
+        recorder.start(site = site.name.lowercase(), displayChannel = displayChan)
         phaseRef = Phase.Measuring
         _state.value = _state.value.copy(
             phase = Phase.Measuring,
@@ -369,6 +390,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             else IntArray(0)
             PulseMorphology.compute(morph, snap.sampleRateHz, peakIdx)
         } else null
+        val site = _state.value.site
+        val displayChan = if (site == Site.Forearm) "G" else "R"
         val session = recorder.stop(
             durationSec = measureElapsed,
             sampleRateHz = snap.sampleRateHz,
@@ -383,7 +406,9 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             timedOut = timedOut,
             spectralBpm = snap.spectralBpm,
             qualityScore = qualityScore,
-            morphology = morphology
+            morphology = morphology,
+            site = site.name.lowercase(),
+            displayChannel = displayChan
         )
 
         val report = Report(
