@@ -133,7 +133,11 @@ class SignalProcessor(
         val displayedRaw = if (useGreen) uniformG else uniformR
         val displayedMorphology = if (useGreen) detrendedG else detrendedR
 
-        val spectralBpm = dominantBpm(filteredR, fs, lowHz, highHz)
+        // Spectral BPM search uses a tighter "plausible adult resting HR" window
+        // independent of the bandpass cutoffs. With the wider 0.5 Hz bandpass we
+        // would otherwise lock onto sub-cardiac vasomotion peaks on forearm R
+        // (DC penetrates deeper, more low-freq energy survives the filter).
+        val spectralBpm = dominantBpm(filteredR, fs, SPECTRAL_LOW_HZ, SPECTRAL_HIGH_HZ)
 
         val samples = ArrayList<Sample>(uniformN)
         for (i in 0 until uniformN) {
@@ -471,5 +475,7 @@ class SignalProcessor(
         private const val W1_SEC = 0.111f          // Elgendi 2013 systolic-peak window
         private const val W2_SEC = 0.667f          // Elgendi 2013 beat-duration window
         private const val ERMA_OFFSET_FRAC = 0.02f // small additive offset above MA2 mean
+        private const val SPECTRAL_LOW_HZ = 0.7f   // 42 BPM lower bound for spectral check
+        private const val SPECTRAL_HIGH_HZ = 2.5f  // 150 BPM upper bound for spectral check
     }
 }
