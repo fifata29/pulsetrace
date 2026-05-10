@@ -11,9 +11,11 @@ import kotlin.math.max
  *     bandpass) so harmonics carrying the dicrotic notch (5–15 Hz) are preserved.
  *     Previously we used the 0.7–4 Hz bandpass, which produced a sinusoid with no
  *     real morphology and nonsensical fiducials.
- *   - Sign convention: in raw red, blood arrival = lower value (more absorption).
- *     We invert internally so the systolic event is a **positive peak**, matching
- *     conventional PPG plots and the Takazawa SDPPG framework.
+ *   - Sign convention: empirical check on this device shows bandpass peaks
+ *     coincide with raw red **maxima** (systolic event = HIGHER red value, not
+ *     lower as one might expect from absorption alone). Likely the bright torch
+ *     + the depth of skin sampling makes scattering dominate over absorption at
+ *     systole. So we do NOT invert — the detrended signal is already systole-up.
  *   - Global systolic-peak search (not "first half"): the systolic peak typically
  *     lives at 15–35 % of the beat duration, but a full-beat search is robust.
  *   - Sanity gates on RI / AIx / AGI / vascular age: garbage is reported as null
@@ -60,12 +62,11 @@ object PulseMorphology {
 
     /**
      * @param morphSignal The detrended-but-not-bandpassed signal at [sampleRateHz].
-     *                    Sign as captured: lower value = blood present (systole).
-     *                    We invert internally.
+     *                    Already systole-up on this device's optical setup (verified
+     *                    empirically — see the polarity check diagnostic).
      * @param sampleRateHz Sample rate of [morphSignal].
      * @param peakIndices Systolic-event indices into [morphSignal] (from peak detection
-     *                    on the heart-rate-bandpassed signal). These tell us *when*
-     *                    each beat happened.
+     *                    on the heart-rate-bandpassed signal).
      */
     fun compute(
         morphSignal: FloatArray,
@@ -76,11 +77,8 @@ object PulseMorphology {
             return Result.unavailable(peakIndices.size)
         }
 
-        // Invert: systole becomes a positive peak, matching conventional PPG sign.
-        val inverted = FloatArray(morphSignal.size) { -morphSignal[it] }
-
         // Spline-upsample for sub-frame fiducial precision (literature-validated).
-        val up = SplineInterp.upsample(inverted, UPSAMPLE)
+        val up = SplineInterp.upsample(morphSignal, UPSAMPLE)
         val fsUp = sampleRateHz * UPSAMPLE
         val peaksUpRaw = IntArray(peakIndices.size) {
             (peakIndices[it] * UPSAMPLE).coerceIn(0, up.size - 1)
