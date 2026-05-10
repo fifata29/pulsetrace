@@ -695,7 +695,7 @@ private fun MorphologyMetricRow(
     value: String,
     unit: String,
     summary: String,
-    onInfo: () -> Unit
+    onInfo: (() -> Unit)? = null
 ) {
     Row(
         Modifier
@@ -708,12 +708,14 @@ private fun MorphologyMetricRow(
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(label, color = Color.White, style = MaterialTheme.typography.labelLarge)
-                Spacer(Modifier.width(4.dp))
-                IconButton(onClick = onInfo, modifier = Modifier.size(20.dp)) {
-                    Icon(
-                        Icons.Outlined.Info, contentDescription = "About $label",
-                        tint = OnSurfaceMuted, modifier = Modifier.size(14.dp)
-                    )
+                if (onInfo != null) {
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(onClick = onInfo, modifier = Modifier.size(20.dp)) {
+                        Icon(
+                            Icons.Outlined.Info, contentDescription = "About $label",
+                            tint = OnSurfaceMuted, modifier = Modifier.size(14.dp)
+                        )
+                    }
                 }
             }
             Text(summary, color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
