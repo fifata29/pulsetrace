@@ -210,11 +210,24 @@ fun RawModeScreen(
                 SiteRow(state.site, viewModel::setSite)
                 Spacer(Modifier.height(8.dp))
                 DurationRow(state.targetSec, viewModel::setDurationSec)
+                Spacer(Modifier.height(8.dp))
+                SweepToggleRow(state.sweepMode, viewModel::setSweepMode)
                 Spacer(Modifier.height(10.dp))
             }
 
             ChannelRow(state)
+            Spacer(Modifier.height(8.dp))
+
+            PulseStrengthBar(state)
+            Spacer(Modifier.height(8.dp))
+
+            PressureBar(state)
             Spacer(Modifier.height(10.dp))
+
+            if (state.isRecording && state.sweepPrompt.isNotBlank()) {
+                SweepPromptCard(state.sweepPrompt)
+                Spacer(Modifier.height(10.dp))
+            }
 
             ProgressBlock(state)
 
@@ -273,6 +286,123 @@ private fun DurationRow(current: Float, onPick: (Float) -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SweepToggleRow(on: Boolean, onSet: (Boolean) -> Unit) {
+    Column {
+        Text("Pressure sweep", color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
+        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Chip(text = "Off", selected = !on) { onSet(false) }
+            Chip(text = "On — guided", selected = on) { onSet(true) }
+        }
+        if (on) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "5 s firm · 5 s released · 15 s slow vary · then hold at strongest pulse",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+    }
+}
+
+@Composable
+private fun PulseStrengthBar(state: RawModeViewModel.UiState) {
+    val ps = state.pulseStrengthG
+    val ref = state.pulseStrengthMaxSeen.coerceAtLeast(0.5f)
+    val frac = (ps / ref).coerceIn(0f, 1f)
+    val barColor = when {
+        ps > 1.5f -> Good
+        ps > 0.6f -> Warn
+        else -> OnSurfaceMuted
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(SurfaceElev)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Pulse strength (G)", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.weight(1f))
+            Text(
+                "%.2f / %.2f".format(ps, ref),
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            progress = { frac },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp)),
+            color = barColor,
+            trackColor = Color.White.copy(alpha = 0.10f)
+        )
+    }
+}
+
+@Composable
+private fun PressureBar(state: RawModeViewModel.UiState) {
+    val haveRange = state.sessionMaxDcG - state.sessionMinDcG > 1.5f
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(SurfaceElev)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Pressure (relative)", color = Color.White, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (haveRange) "%d%%  · DC G %.0f".format((state.pressureFrac * 100).roundToInt(), state.medianDcG)
+                else "vary pressure to calibrate",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        LinearProgressIndicator(
+            progress = { if (haveRange) state.pressureFrac else 0f },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp)),
+            color = Accent,
+            trackColor = Color.White.copy(alpha = 0.10f)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            if (haveRange) "Range G ${state.sessionMinDcG.roundToInt()} → ${state.sessionMaxDcG.roundToInt()}"
+            else "Will populate once you've pressed firm + released during a session",
+            color = OnSurfaceMuted,
+            style = MaterialTheme.typography.labelSmall
+        )
+    }
+}
+
+@Composable
+private fun SweepPromptCard(text: String) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(Accent)
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+        )
     }
 }
 

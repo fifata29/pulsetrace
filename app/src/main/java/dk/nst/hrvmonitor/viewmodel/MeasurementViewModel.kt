@@ -436,7 +436,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         private const val GOOD_LUMA_FRACTION = 0.5f      // current luma must be ≥ 50% of phase-1 baseline
         private const val MAX_GOOD_GAP_NS = 250_000_000L
         private const val REFRESH_MS = 100L
-        private const val ROI_TOP_K = 10
+        private const val ROI_TOP_K = 14
         private const val SEARCH_BUFFER_MAX = 360       // cap memory if fs spikes (12 s at 30 Hz)
     }
 }

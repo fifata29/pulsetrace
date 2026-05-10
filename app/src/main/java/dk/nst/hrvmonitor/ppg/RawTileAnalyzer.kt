@@ -93,16 +93,16 @@ class RawTileAnalyzer(
                 for (col in 0 until gridCols) {
                     val x0 = col * tileW
                     val y0 = row * tileH
-                    val (mr, sr, mg, sg, mb, sb) = tileStats(
+                    val st = tileStats(
                         x0, y0, tw, th,
                         yRowStride, yPixStride, yLen,
                         uRowStride, uPixStride, uLen,
                         vRowStride, vPixStride, vLen
                     )
                     val idx = row * gridCols + col
-                    rMean[idx] = mr; rStd[idx] = sr
-                    gMean[idx] = mg; gStd[idx] = sg
-                    bMean[idx] = mb; bStd[idx] = sb
+                    rMean[idx] = st[0]; rStd[idx] = st[1]
+                    gMean[idx] = st[2]; gStd[idx] = st[3]
+                    bMean[idx] = st[4]; bStd[idx] = st[5]
                 }
             }
 
