@@ -1,16 +1,19 @@
 #
-#  deploy.ps1 — install a freshly-built PulseTrace APK while preserving session data
+#  deploy.ps1 - install a freshly-built PulseTrace APK while preserving session data
 #
 #  Why this exists: the debug APKs from local builds and CI use different signing
-#  keys, so every CI install needs an `adb uninstall` first — which wipes the app's
+#  keys, so every CI install needs an `adb uninstall` first - which wipes the app's
 #  external files directory (sessions/, raw_sessions/, calibrations/). This script
 #  backs up that directory before uninstall and restores it after install, so the
 #  in-app history survives across updates.
 #
-#  Usage:
-#    ./deploy.ps1                                              # auto-detect newest APK in Downloads
-#    ./deploy.ps1 -Apk "C:\path\to\app-debug.apk"              # explicit APK path
-#    ./deploy.ps1 -WaitCi                                      # poll nightly.link until APK is ready
+#  Usage (note: if Windows execution policy blocks scripts, prefix with the bypass):
+#    powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1                                   # newest APK in Downloads
+#    powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -Apk "C:\path\to\app-debug.apk"  # explicit APK path
+#    powershell -ExecutionPolicy Bypass -File scripts/deploy.ps1 -WaitCi                          # poll nightly.link, then install
+#
+#  To make this permanent for your user (one-time, optional):
+#    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 #
 #  Configuration is at the top of the script. ADB and the app package name are the
 #  things you'd ever change.
@@ -52,15 +55,15 @@ function Resolve-Device {
         Write-Warning "Requested device '$wanted' not found; falling back."
     }
     if ($devices.Count -eq 1) { return $devices[0] }
-    # Multiple — prefer non-(2) entries (de-duped wireless connection sometimes has a duplicate).
+    # Multiple - prefer non-(2) entries (de-duped wireless connection sometimes has a duplicate).
     $primary = $devices | Where-Object { $_ -notmatch "\(\d+\)" } | Select-Object -First 1
     if ($primary) { return $primary }
     return $devices[0]
 }
 
 function Adb {
-    param([string]$dev, [Parameter(ValueFromRemainingArguments=$true)]$args)
-    & $ADB -s $dev @args 2>&1
+    param([string]$dev, [Parameter(ValueFromRemainingArguments=$true)]$cmdArgs)
+    & $ADB -s $dev @cmdArgs 2>&1
 }
 
 function Find-LatestApk {
@@ -81,7 +84,7 @@ function Wait-NightlyApk {
         try {
             $r = Invoke-WebRequest -Uri $NIGHTLY_URL -Method Head -UseBasicParsing -ErrorAction Stop
             if ($r.StatusCode -eq 200) {
-                Write-Host "CI build green — downloading..."
+                Write-Host "CI build green - downloading..."
                 $zipPath = Join-Path $DOWNLOADS "pulsetrace-debug-apk-auto.zip"
                 Invoke-WebRequest -Uri $NIGHTLY_URL -OutFile $zipPath -UseBasicParsing
                 $extractDir = Join-Path $DOWNLOADS "pulsetrace-debug-apk-auto"
@@ -112,10 +115,13 @@ function Backup-Sessions {
     $pulled = @()
     foreach ($folder in $PRESERVE) {
         $remote = "$REMOTE_BASE/$folder"
-        $exists = (Adb $dev shell "[ -d '$remote' ] && echo yes" | Out-String).Trim()
-        if ($exists -ne "yes") { continue }
+        # Use `ls -d` to test existence: prints the path if it exists, an error
+        # otherwise. Avoids `&& / ||` which PS 5.1 misparses inside strings.
+        $probe = Adb $dev shell "ls -d $remote 2>/dev/null"
+        $probeStr = ($probe | Out-String).Trim()
+        if (-not $probeStr) { continue }
         Write-Host "  pulling $folder ..." -NoNewline
-        $r = Adb $dev pull "$remote" "$dst"
+        Adb $dev pull "$remote" "$dst" | Out-Null
         Write-Host " done"
         $pulled += $folder
     }
@@ -148,13 +154,13 @@ if (-not $Apk -or -not (Test-Path $Apk)) {
     } else {
         $Apk = Find-LatestApk
         if (-not $Apk) {
-            throw "No APK found in Downloads. Pass -Apk <path> or use -WaitCi to download from CI."
+            throw "No APK found in Downloads. Pass -Apk [path] or use -WaitCi to download from CI."
         }
     }
 }
 Write-Host "APK: $Apk"
 
-Write-Host "Step 1/4 — backing up session data ..."
+Write-Host "Step 1/4 - backing up session data ..."
 $backup = Backup-Sessions -dev $dev
 if ($backup.Folders.Count -eq 0) {
     Write-Host "  (nothing to back up)"
@@ -162,10 +168,10 @@ if ($backup.Folders.Count -eq 0) {
     Write-Host "  saved to $($backup.Path)"
 }
 
-Write-Host "Step 2/4 — uninstalling old app ..."
+Write-Host "Step 2/4 - uninstalling old app ..."
 Adb $dev uninstall $PKG | Out-Null
 
-Write-Host "Step 3/4 — installing new APK ..."
+Write-Host "Step 3/4 - installing new APK ..."
 $installOut = Adb $dev install -r "$Apk"
 if ("$installOut" -notmatch "Success") {
     throw "adb install failed:`n$installOut"
@@ -177,7 +183,7 @@ Write-Host "  cold-starting the app to create the files dir ..."
 Adb $dev shell "monkey -p $PKG -c android.intent.category.LAUNCHER 1" | Out-Null
 Start-Sleep -Seconds 3
 
-Write-Host "Step 4/4 — restoring session data ..."
+Write-Host "Step 4/4 - restoring session data ..."
 Restore-Sessions -dev $dev -backup $backup
 Write-Host ""
 Write-Host "Done. Open PulseTrace to verify history is intact."
