@@ -80,10 +80,20 @@ function Wait-NightlyApk {
     param([int]$timeoutSec)
     $start = Get-Date
     Write-Host "Polling $NIGHTLY_URL ..."
+    # IMPORTANT: nightly.link's HEAD endpoint stays 404 for some time even
+    # after the artifact is GET-able (different cache backends). Probe with a
+    # tiny ranged GET so we don't wait pointlessly while the build is ready.
     while ($true) {
         try {
-            $r = Invoke-WebRequest -Uri $NIGHTLY_URL -Method Head -UseBasicParsing -ErrorAction Stop
-            if ($r.StatusCode -eq 200) {
+            $req = [System.Net.HttpWebRequest]::Create($NIGHTLY_URL)
+            $req.Method = "GET"
+            $req.AddRange(0, 0)
+            $req.AllowAutoRedirect = $true
+            $req.Timeout = 15000
+            $resp = $req.GetResponse()
+            $code = [int]$resp.StatusCode
+            $resp.Close()
+            if ($code -eq 200 -or $code -eq 206) {
                 Write-Host "CI build green - downloading..."
                 $zipPath = Join-Path $DOWNLOADS "pulsetrace-debug-apk-auto.zip"
                 Invoke-WebRequest -Uri $NIGHTLY_URL -OutFile $zipPath -UseBasicParsing
@@ -95,9 +105,8 @@ function Wait-NightlyApk {
                 throw "Zip extracted but no app-debug.apk found in $extractDir"
             }
         } catch {
-            $code = $null
-            if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
-            if ($code -ne 404) { Write-Verbose "poll: $($_.Exception.Message)" }
+            $msg = "$($_.Exception.Message)"
+            if ($msg -notlike "*(404)*") { Write-Verbose "poll: $msg" }
         }
         if (((Get-Date) - $start).TotalSeconds -gt $timeoutSec) {
             throw "CI build did not become ready within $timeoutSec s."
