@@ -23,6 +23,20 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
      *  forearm dorsal (outer / hairy side, different vascular bed). */
     enum class Site { Fingertip, Palm, ForearmVolar, ForearmDorsal, Other }
 
+    /** Camera control mode for the recording.
+     *
+     *  - Auto: legacy behaviour. Camera2 picks ISO, exposure time, white-balance
+     *    gains automatically; AE_LOCK + AWB_LOCK are set at the moment recording
+     *    starts but the *values* the camera locked at are whatever it happened
+     *    to converge on (often suboptimal — high ISO with shot noise, drifting
+     *    exposure that bleeds into the pulse signal).
+     *
+     *  - Manual: AE and AWB disabled entirely. Fixed ISO, fixed exposure, fixed
+     *    colour gains. The camera becomes a deterministic photon-to-count
+     *    converter — the only thing that varies frame-to-frame is light
+     *    reaching the sensor, which is what we actually want for PPG. */
+    enum class CameraMode { Auto, Manual }
+
     /**
      * Sweep mode walks the user through a fixed pressure protocol so the AC-vs-DC
      * curve can be analysed offline. Layout (s since Start):
@@ -34,6 +48,7 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
     data class UiState(
         val isRecording: Boolean = false,
         val site: Site = Site.ForearmVolar,
+        val cameraMode: CameraMode = CameraMode.Manual,
         val targetSec: Float = DEFAULT_DURATION_SEC,
         val targetFps: Int = TARGET_FPS,
         val sweepMode: Boolean = false,
@@ -150,6 +165,15 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
         _state.value = _state.value.copy(site = site)
     }
 
+    fun setCameraMode(mode: CameraMode) {
+        if (_state.value.isRecording) return
+        _state.value = _state.value.copy(cameraMode = mode)
+    }
+
+    fun appendCameraMetadata(meta: RawRecorder.CameraMetadata) {
+        if (_state.value.isRecording) recorder.appendCameraMetadata(meta)
+    }
+
     fun setDurationSec(sec: Float) {
         if (_state.value.isRecording) return
         _state.value = _state.value.copy(targetSec = sec.coerceIn(30f, 300f))
@@ -185,7 +209,8 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
             targetFps = TARGET_FPS,
             targetDurationSec = target,
             site = site.name.lowercase(),
-            notes = combinedNotes
+            notes = combinedNotes,
+            cameraMode = _state.value.cameraMode.name.lowercase()
         )
 
         _state.value = _state.value.copy(

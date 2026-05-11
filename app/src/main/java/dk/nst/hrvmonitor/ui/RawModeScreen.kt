@@ -1,6 +1,11 @@
 package dk.nst.hrvmonitor.ui
 
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
+import android.hardware.camera2.params.RggbChannelVector
 import android.util.Range
 import android.util.Size as AndroidSize
 import androidx.camera.camera2.interop.Camera2CameraControl
@@ -74,10 +79,19 @@ import dk.nst.hrvmonitor.ui.theme.OnSurfaceMuted
 import dk.nst.hrvmonitor.ui.theme.SurfaceDark
 import dk.nst.hrvmonitor.ui.theme.SurfaceElev
 import dk.nst.hrvmonitor.ui.theme.Warn
+import dk.nst.hrvmonitor.data.RawRecorder
 import dk.nst.hrvmonitor.viewmodel.RawModeViewModel
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
+
+// Manual-mode camera settings. ISO 200 + 8 ms exposure is a balanced starting
+// point: bright enough on dim forearm, not noise-dominated, leaves headroom at
+// 60 FPS (frame period 16.67 ms). The metadata logs from real recordings will
+// tell us whether these need tuning per site.
+private const val MANUAL_ISO = 200
+private const val MANUAL_EXPOSURE_NS = 8_000_000L
+private const val MANUAL_FRAME_DURATION_NS = 16_666_667L  // ~60 FPS
 
 @OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -98,7 +112,12 @@ fun RawModeScreen(
     val analysisExecutor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
     var camera by remember { mutableStateOf<Camera?>(null) }
 
-    LaunchedEffect(Unit) {
+    // Camera binding — re-runs when cameraMode changes so manual-mode capture
+    // request options (AE_OFF + fixed ISO + fixed exposure + AWB_OFF + identity
+    // colour gains) get baked into the ImageAnalysis builder. Auto mode keeps
+    // the previous behaviour (AE/AWB locks set via captureRequestOptions when
+    // recording starts).
+    LaunchedEffect(state.cameraMode) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
             val provider = try { providerFuture.get() } catch (_: Exception) { return@addListener }
@@ -113,11 +132,72 @@ fun RawModeScreen(
             val analysisBuilder = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setResolutionSelector(resolution)
-            Camera2Interop.Extender(analysisBuilder)
-                .setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    Range(RawModeViewModel.TARGET_FPS, RawModeViewModel.TARGET_FPS)
+            val extender = Camera2Interop.Extender(analysisBuilder)
+            extender.setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                Range(RawModeViewModel.TARGET_FPS, RawModeViewModel.TARGET_FPS)
+            )
+
+            if (state.cameraMode == RawModeViewModel.CameraMode.Manual) {
+                // Disable AE; fix ISO + exposure. 8 ms exposure leaves headroom
+                // at 60 FPS (max 16.67 ms). ISO 200 is a defensible "low noise
+                // but bright enough" default — we'll see in metadata logs
+                // whether forearm needs higher.
+                extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF
                 )
+                extender.setCaptureRequestOption(
+                    CaptureRequest.SENSOR_SENSITIVITY, MANUAL_ISO
+                )
+                extender.setCaptureRequestOption(
+                    CaptureRequest.SENSOR_EXPOSURE_TIME, MANUAL_EXPOSURE_NS
+                )
+                extender.setCaptureRequestOption(
+                    CaptureRequest.SENSOR_FRAME_DURATION, MANUAL_FRAME_DURATION_NS
+                )
+                // Disable AWB; identity colour gains so R, G, B reach the
+                // sensor with the same scaling.
+                extender.setCaptureRequestOption(
+                    CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF
+                )
+                extender.setCaptureRequestOption(
+                    CaptureRequest.COLOR_CORRECTION_MODE,
+                    CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
+                )
+                extender.setCaptureRequestOption(
+                    CaptureRequest.COLOR_CORRECTION_GAINS,
+                    RggbChannelVector(1.0f, 1.0f, 1.0f, 1.0f)
+                )
+            }
+
+            // Per-frame metadata capture callback — fires on every completed
+            // capture, lets us record what ISO/exposure/AE-state/AWB-state the
+            // sensor reported for that frame.
+            extender.setSessionCaptureCallback(object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    val gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS)
+                    viewModel.appendCameraMetadata(
+                        RawRecorder.CameraMetadata(
+                            timestampNs = System.nanoTime(),
+                            sensorTimestampNs = result.get(CaptureResult.SENSOR_TIMESTAMP) ?: 0L,
+                            isoSensitivity = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: 0,
+                            exposureTimeNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: 0L,
+                            frameDurationNs = result.get(CaptureResult.SENSOR_FRAME_DURATION) ?: 0L,
+                            aeState = result.get(CaptureResult.CONTROL_AE_STATE) ?: -1,
+                            awbState = result.get(CaptureResult.CONTROL_AWB_STATE) ?: -1,
+                            rGain = gains?.red ?: 0f,
+                            gEvenGain = gains?.greenEven ?: 0f,
+                            gOddGain = gains?.greenOdd ?: 0f,
+                            bGain = gains?.blue ?: 0f
+                        )
+                    )
+                }
+            })
+
             val analysis = analysisBuilder.build()
                 .also { it.setAnalyzer(analysisExecutor, viewModel.analyzer) }
 
@@ -138,8 +218,10 @@ fun RawModeScreen(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    LaunchedEffect(state.isRecording, camera) {
+    // AE/AWB LOCK only matters in Auto mode (Manual already has both disabled).
+    LaunchedEffect(state.isRecording, state.cameraMode, camera) {
         val cam = camera ?: return@LaunchedEffect
+        if (state.cameraMode != RawModeViewModel.CameraMode.Auto) return@LaunchedEffect
         val c2 = Camera2CameraControl.from(cam.cameraControl)
         val opts = CaptureRequestOptions.Builder().apply {
             setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, state.isRecording)
@@ -215,6 +297,8 @@ fun RawModeScreen(
 
             if (!state.isRecording) {
                 SiteRow(state.site, viewModel::setSite)
+                Spacer(Modifier.height(8.dp))
+                CameraModeRow(state.cameraMode, viewModel::setCameraMode)
                 Spacer(Modifier.height(8.dp))
                 DurationRow(state.targetSec, viewModel::setDurationSec)
                 Spacer(Modifier.height(8.dp))
@@ -304,6 +388,35 @@ private fun DurationRow(current: Float, onPick: (Float) -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CameraModeRow(
+    selected: RawModeViewModel.CameraMode,
+    onSet: (RawModeViewModel.CameraMode) -> Unit
+) {
+    Column {
+        Text("Camera mode", color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
+        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (m in RawModeViewModel.CameraMode.values()) {
+                val label = when (m) {
+                    RawModeViewModel.CameraMode.Auto -> "Auto"
+                    RawModeViewModel.CameraMode.Manual -> "Manual · ISO $MANUAL_ISO, ${MANUAL_EXPOSURE_NS / 1_000_000} ms"
+                }
+                Chip(text = label, selected = m == selected) { onSet(m) }
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            if (selected == RawModeViewModel.CameraMode.Manual)
+                "AE + AWB disabled. Fixed ISO + exposure + identity colour gains. Stable photon-to-count for clean PPG extraction."
+            else
+                "Camera auto-adjusts ISO + exposure + colour gains. AE/AWB lock when recording starts, but freeze at whatever the AE happened to pick.",
+            color = OnSurfaceMuted,
+            style = MaterialTheme.typography.labelSmall
+        )
     }
 }
 
