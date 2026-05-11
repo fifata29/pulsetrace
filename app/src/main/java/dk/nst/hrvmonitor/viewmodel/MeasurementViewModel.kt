@@ -291,20 +291,36 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         val out = FloatArray(nTiles)
         val have = if (scoutRingWritten >= SCOUT_RING_SIZE.toLong())
             SCOUT_RING_SIZE else scoutRingWritten.toInt()
-        if (have < 8) return Triple(out, -1, -1)
+        if (have < 16) return Triple(out, -1, -1)
+        val start = if (scoutRingWritten >= SCOUT_RING_SIZE.toLong())
+            (scoutRingWritten % SCOUT_RING_SIZE).toInt() else 0
         var bestIdx = -1
         var bestAc = 0f
         for (i in 0 until nTiles) {
             val ring = scoutRing[i]
+            // Single-pole IIR HPF (cardiac band only), then std of the filtered
+            // ring. See companion-object comment.
+            var prevX = ring[start]
+            var prevY = 0f
             var sum = 0.0
             var sumSq = 0.0
-            for (j in 0 until have) {
-                val v = ring[j]
-                sum += v
-                sumSq += v * v
+            var n = 0
+            for (k in 1 until have) {
+                val idx = if (start + k < SCOUT_RING_SIZE) start + k
+                          else start + k - SCOUT_RING_SIZE
+                val x = ring[idx]
+                val y = SCOUT_HPF_ALPHA * (prevY + x - prevX)
+                prevX = x
+                prevY = y
+                if (k >= SCOUT_HPF_WARMUP) {
+                    sum += y
+                    sumSq += y.toDouble() * y
+                    n++
+                }
             }
-            val mean = sum / have
-            val variance = (sumSq / have - mean * mean).coerceAtLeast(0.0)
+            if (n < 2) continue
+            val mean = sum / n
+            val variance = (sumSq / n - mean * mean).coerceAtLeast(0.0)
             val ac = sqrt(variance).toFloat()
             out[i] = ac
             if (ac > bestAc) { bestAc = ac; bestIdx = i }
@@ -715,5 +731,10 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         private const val ROI_TOP_K = 14
         private const val SEARCH_BUFFER_MAX = 360       // cap memory if fs spikes (12 s at 30 Hz)
         private const val SCOUT_RING_SIZE = 128         // ~2 s @ 60 Hz, ring per tile for live AC
+        // 1st-order IIR HPF for the scout heatmap: alpha = exp(-2π·fc/fs) with
+        // fc≈0.7 Hz, fs≈60 Hz. Removes drift/respiration so the heatmap shows
+        // cardiac-band power, not whichever tile happens to be wiggling most.
+        private const val SCOUT_HPF_ALPHA = 0.929f
+        private const val SCOUT_HPF_WARMUP = 12
     }
 }

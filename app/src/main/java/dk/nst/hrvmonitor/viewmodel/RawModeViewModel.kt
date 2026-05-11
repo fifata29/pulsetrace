@@ -122,27 +122,47 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /** Returns (tileAc array, bestIdx, bestAc). tileAc[i] is the std of the
-     *  recent green-channel values for tile i, used as a fast pulse-amplitude
-     *  proxy. */
+     *  cardiac-band component (>~0.7 Hz / 42 BPM) of the recent green-channel
+     *  values for tile i. We run a single-pole IIR high-pass over each tile's
+     *  ring before taking std — without that the std mixes pulse with slow
+     *  drift (AE adjustment, breathing, vasomotion, motion artefact), which
+     *  is what made the old heatmap "not helpful". */
     private fun computeTileAcs(): Triple<FloatArray, Int, Float> {
         val nTiles = GRID_COLS * GRID_ROWS
         val out = FloatArray(nTiles)
         val have = if (ringWritten >= RING_BUFFER_SIZE.toLong())
             RING_BUFFER_SIZE else ringWritten.toInt()
-        if (have < 8) return Triple(out, -1, 0f)
+        if (have < 16) return Triple(out, -1, 0f)
+        // start = index of oldest sample in the ring.
+        val start = if (ringWritten >= RING_BUFFER_SIZE.toLong())
+            (ringWritten % RING_BUFFER_SIZE).toInt() else 0
         var bestIdx = -1
         var bestAc = 0f
         for (i in 0 until nTiles) {
             val ring = ringPerTile[i]
+            // HPF: y[n] = alpha * (y[n-1] + x[n] - x[n-1]); discard first
+            // HPF_WARMUP samples to let the filter settle.
+            var prevX = ring[start]
+            var prevY = 0f
             var sum = 0.0
             var sumSq = 0.0
-            for (j in 0 until have) {
-                val v = ring[j]
-                sum += v
-                sumSq += v * v
+            var n = 0
+            for (k in 1 until have) {
+                val idx = if (start + k < RING_BUFFER_SIZE) start + k
+                          else start + k - RING_BUFFER_SIZE
+                val x = ring[idx]
+                val y = HPF_ALPHA * (prevY + x - prevX)
+                prevX = x
+                prevY = y
+                if (k >= HPF_WARMUP) {
+                    sum += y
+                    sumSq += y.toDouble() * y
+                    n++
+                }
             }
-            val mean = sum / have
-            val variance = (sumSq / have - mean * mean).coerceAtLeast(0.0)
+            if (n < 2) continue
+            val mean = sum / n
+            val variance = (sumSq / n - mean * mean).coerceAtLeast(0.0)
             val ac = sqrt(variance).toFloat()
             out[i] = ac
             if (ac > bestAc) { bestAc = ac; bestIdx = i }
@@ -301,6 +321,10 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
         const val GRID_ROWS = 12
         private const val REFRESH_MS = 100L
         private const val RING_BUFFER_SIZE = 128 // ~2 s @ 60 Hz
+        // 1st-order IIR HPF: alpha = exp(-2π·fc/fs) with fc≈0.7 Hz, fs≈60 Hz.
+        // Cuts respiration / vasomotion / AE drift below 42 BPM, keeps cardiac.
+        private const val HPF_ALPHA = 0.929f
+        private const val HPF_WARMUP = 12  // ~0.2 s settling at 60 Hz
 
         const val SWEEP_PRESS_END = 5f
         const val SWEEP_RELEASE_END = 10f

@@ -1,11 +1,9 @@
 package dk.nst.hrvmonitor.ui
 
 import android.hardware.camera2.CameraCaptureSession
-import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
-import android.hardware.camera2.params.RggbChannelVector
 import android.util.Range
 import android.util.Size as AndroidSize
 import androidx.camera.camera2.interop.Camera2CameraControl
@@ -85,13 +83,17 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
-// Manual-mode camera settings. ISO 200 + 8 ms exposure is a balanced starting
-// point: bright enough on dim forearm, not noise-dominated, leaves headroom at
-// 60 FPS (frame period 16.67 ms). The metadata logs from real recordings will
-// tell us whether these need tuning per site.
-private const val MANUAL_ISO = 200
-private const val MANUAL_EXPOSURE_NS = 8_000_000L
-private const val MANUAL_FRAME_DURATION_NS = 16_666_667L  // ~60 FPS
+// "Manual" mode on OnePlus 11: we wanted AE_OFF + AWB_OFF + fixed ISO/exposure/
+// gains, but the HAL silently ignored CONTROL_AWB_MODE=OFF and our colour-gain
+// overrides (AWB stayed CONVERGED, gains drifted 0.7..1.2 / 2.6..4.5). Result
+// was unusably dark and non-deterministic frames.
+//
+// What works WITH the HAL: keep AE on but pull the exposure target down by
+// ~2 stops via CONTROL_AE_EXPOSURE_COMPENSATION. Units are
+// CONTROL_AE_COMPENSATION_STEP (typically 1/2 EV on this device), so -6 lands
+// at -3 EV. Keeps R/G/B off the 254 saturation ceiling on fingertip while
+// staying bright enough on forearm.
+private const val MANUAL_EC_STEPS = -6
 
 @OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -113,10 +115,9 @@ fun RawModeScreen(
     var camera by remember { mutableStateOf<Camera?>(null) }
 
     // Camera binding — re-runs when cameraMode changes so manual-mode capture
-    // request options (AE_OFF + fixed ISO + fixed exposure + AWB_OFF + identity
-    // colour gains) get baked into the ImageAnalysis builder. Auto mode keeps
-    // the previous behaviour (AE/AWB locks set via captureRequestOptions when
-    // recording starts).
+    // request options (CONTROL_AE_EXPOSURE_COMPENSATION = -6 ≈ -3 EV) get baked
+    // into the ImageAnalysis builder. Auto mode keeps the previous behaviour
+    // (AE/AWB locks set via captureRequestOptions when recording starts).
     LaunchedEffect(state.cameraMode) {
         val providerFuture = ProcessCameraProvider.getInstance(context)
         providerFuture.addListener({
@@ -139,51 +140,8 @@ fun RawModeScreen(
             )
 
             if (state.cameraMode == RawModeViewModel.CameraMode.Manual) {
-                // Disable AE; fix ISO + exposure. 8 ms exposure leaves headroom
-                // at 60 FPS (max 16.67 ms). ISO 200 is a defensible "low noise
-                // but bright enough" default — we'll see in metadata logs
-                // whether forearm needs higher.
                 extender.setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF
-                )
-                extender.setCaptureRequestOption(
-                    CaptureRequest.SENSOR_SENSITIVITY, MANUAL_ISO
-                )
-                extender.setCaptureRequestOption(
-                    CaptureRequest.SENSOR_EXPOSURE_TIME, MANUAL_EXPOSURE_NS
-                )
-                extender.setCaptureRequestOption(
-                    CaptureRequest.SENSOR_FRAME_DURATION, MANUAL_FRAME_DURATION_NS
-                )
-                // CRITICAL: when CONTROL_AE_MODE is OFF, the AE pipeline no
-                // longer orchestrates the flash. cameraControl.enableTorch(true)
-                // is silently ignored. We must explicitly request the torch via
-                // FLASH_MODE = TORCH in the capture request itself. Without
-                // this, the previous "Manual mode" recordings were dark
-                // (R DC ~5/255) because the LED was off — diagnosed from
-                // raw-tiles.csv DC analysis on the first user attempts.
-                extender.setCaptureRequestOption(
-                    CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH
-                )
-                // Disable AWB; identity colour gains so R, G, B reach the
-                // sensor with the same scaling.
-                extender.setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF
-                )
-                // COLOR_CORRECTION_MODE_FAST lets the ISP pick a sensible
-                // colour transform matrix. We tried TRANSFORM_MATRIX without
-                // supplying COLOR_CORRECTION_TRANSFORM and the output came
-                // back essentially black even when the flash was lit — the
-                // ISP was applying a zero/default matrix and nulling the data.
-                // FAST honours our COLOR_CORRECTION_GAINS but supplies the
-                // transform internally.
-                extender.setCaptureRequestOption(
-                    CaptureRequest.COLOR_CORRECTION_MODE,
-                    CameraMetadata.COLOR_CORRECTION_MODE_FAST
-                )
-                extender.setCaptureRequestOption(
-                    CaptureRequest.COLOR_CORRECTION_GAINS,
-                    RggbChannelVector(1.0f, 1.0f, 1.0f, 1.0f)
+                    CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, MANUAL_EC_STEPS
                 )
             }
 
@@ -235,10 +193,12 @@ fun RawModeScreen(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    // AE/AWB LOCK only matters in Auto mode (Manual already has both disabled).
+    // Lock AE/AWB the moment recording starts, regardless of mode. In Auto this
+    // freezes whatever the AE happened to converge on. In Manual (AE on, biased
+    // dimmer via exposure compensation) it freezes the dimmed exposure target so
+    // it can't drift mid-recording.
     LaunchedEffect(state.isRecording, state.cameraMode, camera) {
         val cam = camera ?: return@LaunchedEffect
-        if (state.cameraMode != RawModeViewModel.CameraMode.Auto) return@LaunchedEffect
         val c2 = Camera2CameraControl.from(cam.cameraControl)
         val opts = CaptureRequestOptions.Builder().apply {
             setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, state.isRecording)
@@ -420,7 +380,7 @@ private fun CameraModeRow(
             for (m in RawModeViewModel.CameraMode.values()) {
                 val label = when (m) {
                     RawModeViewModel.CameraMode.Auto -> "Auto"
-                    RawModeViewModel.CameraMode.Manual -> "Manual · ISO $MANUAL_ISO, ${MANUAL_EXPOSURE_NS / 1_000_000} ms"
+                    RawModeViewModel.CameraMode.Manual -> "Manual · −2 EV"
                 }
                 Chip(text = label, selected = m == selected) { onSet(m) }
             }
@@ -428,7 +388,7 @@ private fun CameraModeRow(
         Spacer(Modifier.height(4.dp))
         Text(
             if (selected == RawModeViewModel.CameraMode.Manual)
-                "AE + AWB disabled. Fixed ISO + exposure + identity colour gains. Stable photon-to-count for clean PPG extraction."
+                "AE biased −2 stops via exposure compensation, locked on Start. Keeps the red channel off the 254 saturation ceiling on fingertip — full AE_OFF doesn't work on this device's HAL."
             else
                 "Camera auto-adjusts ISO + exposure + colour gains. AE/AWB lock when recording starts, but freeze at whatever the AE happened to pick.",
             color = OnSurfaceMuted,
