@@ -208,7 +208,7 @@ if ($Restore) {
     Write-Host "Step 4/4 - skipping in-app restore (data preserved on PC)"
     if ($backup.Folders.Count -gt 0) {
         Write-Host "  PC backup: $($backup.Path)"
-        Write-Host "  In-app history starts fresh on the phone after install — this is"
+        Write-Host "  In-app history starts fresh on the phone after install - this is"
         Write-Host "  expected. Past sessions are intact in the backup folder above and"
         Write-Host "  in F:\Vibe Coding\HRV App\sessions\ for Python analysis."
     }
