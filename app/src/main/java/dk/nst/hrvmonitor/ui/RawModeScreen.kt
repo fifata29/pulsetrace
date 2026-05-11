@@ -286,6 +286,9 @@ fun RawModeScreen(
             ChannelRow(state)
             Spacer(Modifier.height(8.dp))
 
+            LiveDiagnosticPanel(state)
+            Spacer(Modifier.height(8.dp))
+
             PulseStrengthBar(state)
             Spacer(Modifier.height(8.dp))
 
@@ -490,6 +493,163 @@ private fun PositionScoutHint(state: RawModeViewModel.UiState) {
                     "which areas are picking up the pulse. Slide laterally to maximize the bright region.",
             color = OnSurfaceMuted,
             style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp)
+        )
+    }
+}
+
+/**
+ * Live diagnostic panel — three rows of information that update every 100 ms
+ * even when not recording, so the user can debug what the camera is doing and
+ * whether the signal contains a pulse before committing to a recording.
+ *
+ *   Row 1 — scrolling PPG waveform (last ~4 s of best-tile, high-passed at
+ *           ~0.7 Hz). Pulse is a periodic wiggle here, not on the raw RGB
+ *           numbers (those are dominated by AC + DC drift).
+ *   Row 2 — live BPM derived from peak detection on the trace; pulse-amplitude
+ *           std and the strength-vs-max ratio.
+ *   Row 3 — camera metadata as reported by CaptureResult: ISO, exposure time
+ *           in ms, AWB R/G/B gains, AE/AWB state. If we asked for Manual and
+ *           AWB state is anything other than 0 (INACTIVE) the HAL has
+ *           overridden us — the headline diagnostic.
+ */
+@Composable
+private fun LiveDiagnosticPanel(state: RawModeViewModel.UiState) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(SurfaceElev)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "Live signal — best tile (HPF G)",
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (state.liveBpm > 0f) "${state.liveBpm.roundToInt()} bpm"
+                else "— bpm",
+                color = if (state.liveBpm > 0f) Good else OnSurfaceMuted,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        PpgStripChart(
+            trace = state.ppgTrace,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(SurfaceDark)
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Camera (live from CaptureResult)",
+            color = OnSurfaceMuted,
+            style = MaterialTheme.typography.labelSmall
+        )
+        Spacer(Modifier.height(4.dp))
+        val expMs = state.liveExposureNs / 1e6f
+        val aeLabel = aeStateLabel(state.liveAeState)
+        val awbLabel = awbStateLabel(state.liveAwbState)
+        val awbBad = state.cameraMode == RawModeViewModel.CameraMode.Manual &&
+            state.liveAwbState !in setOf(0, 3) && state.liveAwbState != -1
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            MetaCell("ISO", "${state.liveIso}")
+            MetaCell("Exp", "%.2f ms".format(expMs))
+            MetaCell("AE", aeLabel, tint = if (state.isRecording && state.liveAeState != 3) Warn else null)
+            MetaCell("AWB", awbLabel, tint = if (awbBad) Warn else null)
+        }
+        Spacer(Modifier.height(4.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            MetaCell("R gain", "%.2f".format(state.liveRGain))
+            MetaCell("G gain", "%.2f".format(state.liveGGain))
+            MetaCell("B gain", "%.2f".format(state.liveBGain))
+            MetaCell("FPS", "%.0f".format(state.sampleRateHz))
+        }
+    }
+}
+
+@Composable
+private fun MetaCell(label: String, value: String, tint: Color? = null) {
+    Column(horizontalAlignment = Alignment.Start) {
+        Text(label, color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
+        Text(
+            value,
+            color = tint ?: Color.White,
+            style = MaterialTheme.typography.labelMedium
+        )
+    }
+}
+
+private fun aeStateLabel(s: Int): String = when (s) {
+    -1 -> "—"
+    0 -> "INACT"
+    1 -> "SRCH"
+    2 -> "CONV"
+    3 -> "LOCK"
+    4 -> "FLASH"
+    5 -> "PRECP"
+    else -> s.toString()
+}
+
+private fun awbStateLabel(s: Int): String = when (s) {
+    -1 -> "—"
+    0 -> "INACT"
+    1 -> "SRCH"
+    2 -> "CONV"
+    3 -> "LOCK"
+    else -> s.toString()
+}
+
+/**
+ * Scrolling polyline of the HPF'd green-channel signal. Auto-scales vertically
+ * to the peak-to-peak of the current trace so a weak pulse is still visible.
+ * Zero-line drawn for reference.
+ */
+@Composable
+private fun PpgStripChart(trace: FloatArray, modifier: Modifier) {
+    Canvas(modifier) {
+        val n = trace.size
+        if (n < 2) return@Canvas
+        var lo = Float.POSITIVE_INFINITY
+        var hi = Float.NEGATIVE_INFINITY
+        for (v in trace) { if (v < lo) lo = v; if (v > hi) hi = v }
+        if (!lo.isFinite() || !hi.isFinite() || hi - lo < 1e-4f) return@Canvas
+        val pad = (hi - lo) * 0.15f
+        lo -= pad; hi += pad
+        val w = size.width
+        val h = size.height
+        // Zero line.
+        val zeroY = h - (0f - lo) / (hi - lo) * h
+        if (zeroY in 0f..h) {
+            drawLine(
+                color = Color.White.copy(alpha = 0.10f),
+                start = Offset(0f, zeroY),
+                end = Offset(w, zeroY),
+                strokeWidth = 1f
+            )
+        }
+        val path = androidx.compose.ui.graphics.Path()
+        val xStep = w / (n - 1).toFloat()
+        for (i in 0 until n) {
+            val v = trace[i]
+            val y = h - (v - lo) / (hi - lo) * h
+            val x = i * xStep
+            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        drawPath(
+            path = path,
+            color = Color(0xFF81C784),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.5f)
         )
     }
 }
