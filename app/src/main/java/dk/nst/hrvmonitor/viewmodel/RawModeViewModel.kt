@@ -16,7 +16,12 @@ import kotlin.math.sqrt
 
 class RawModeViewModel(application: Application) : AndroidViewModel(application) {
 
-    enum class Site { Fingertip, Forearm, Wrist, Other }
+    /** Raw Mode is for research recordings — we label the body site precisely
+     *  so offline analysis can compare like-with-like across the 4 sites that
+     *  matter to us: fingertip (transmission PPG), palm (reflectance, thick
+     *  tissue), forearm volar (inner / vein side, classic reflectance site),
+     *  forearm dorsal (outer / hairy side, different vascular bed). */
+    enum class Site { Fingertip, Palm, ForearmVolar, ForearmDorsal, Other }
 
     /**
      * Sweep mode walks the user through a fixed pressure protocol so the AC-vs-DC

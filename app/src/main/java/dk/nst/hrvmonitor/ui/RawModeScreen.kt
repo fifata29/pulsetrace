@@ -266,14 +266,25 @@ private fun RawHeader(onBack: () -> Unit) {
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun SiteRow(selected: RawModeViewModel.Site, onPick: (RawModeViewModel.Site) -> Unit) {
     Column {
         Text("Site", color = OnSurfaceMuted, style = MaterialTheme.typography.labelSmall)
         Spacer(Modifier.height(4.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        androidx.compose.foundation.layout.FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
             for (s in RawModeViewModel.Site.values()) {
-                Chip(text = s.name, selected = s == selected) { onPick(s) }
+                val label = when (s) {
+                    RawModeViewModel.Site.Fingertip -> "Fingertip"
+                    RawModeViewModel.Site.Palm -> "Palm"
+                    RawModeViewModel.Site.ForearmVolar -> "Forearm volar"
+                    RawModeViewModel.Site.ForearmDorsal -> "Forearm dorsal"
+                    RawModeViewModel.Site.Other -> "Other"
+                }
+                Chip(text = label, selected = s == selected) { onPick(s) }
             }
         }
     }
