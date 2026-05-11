@@ -33,7 +33,7 @@ class RawModeViewModel(application: Application) : AndroidViewModel(application)
      */
     data class UiState(
         val isRecording: Boolean = false,
-        val site: Site = Site.Forearm,
+        val site: Site = Site.ForearmVolar,
         val targetSec: Float = DEFAULT_DURATION_SEC,
         val targetFps: Int = TARGET_FPS,
         val sweepMode: Boolean = false,
