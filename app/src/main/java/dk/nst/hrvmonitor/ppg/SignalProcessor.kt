@@ -221,10 +221,14 @@ class SignalProcessor(
         return out
     }
 
-    /** 4th-order Butterworth bandpass via two cascaded biquads of each kind,
-     *  each applied bidirectionally for zero-phase response (filtfilt-style).
-     *  Effective rolloff is ~24 dB/octave at each band edge once the filtfilt
-     *  doubling is counted, sharper than the previous 2nd-order version. */
+    /** 2nd-order Butterworth bandpass applied bidirectionally for zero-phase
+     *  response (filtfilt-style) → effective 4th-order rolloff at ~24 dB/octave.
+     *
+     *  History: a previous "4th-order cascade" attempt applied two identical-Q
+     *  biquads in series, which mathematically is NOT a 4th-order Butterworth
+     *  (proper 4th-order needs second-order sections with different Q values).
+     *  That cascade put weird power in the 0.5–0.8 Hz band and consistently
+     *  fooled dominantBpm into reporting 42–45 BPM. Reverted. */
     private fun butterworthBandpass(x: FloatArray, fs: Float, low: Float, high: Float): FloatArray {
         val cutLow = low.coerceAtLeast(0.05f)
         val cutHigh = high.coerceAtMost(fs * 0.45f)
@@ -233,23 +237,17 @@ class SignalProcessor(
         val (bHp, aHp) = biquadHighpass(cutLow, fs)
         val (bLp, aLp) = biquadLowpass(cutHigh, fs)
 
-        var s = filterBiDirectional(x, bHp, aHp)
-        s = filterBiDirectional(s, bHp, aHp)
-        s = filterBiDirectional(s, bLp, aLp)
-        s = filterBiDirectional(s, bLp, aLp)
-        return s
+        val s1 = filterBiDirectional(x, bHp, aHp)
+        return filterBiDirectional(s1, bLp, aLp)
     }
 
-    /** Zero-phase Butterworth highpass — used in place of the old MA detrend.
-     *  Smoothness priors (Tarvainen 2002) would be the literature gold-standard,
-     *  but a 2nd-order biquad applied bidirectionally has a flat passband above
-     *  ~1.5×fc and rejects baseline drift more cleanly than a moving average. */
+    /** Zero-phase Butterworth highpass — single biquad through filtfilt for
+     *  effective 4th-order rolloff. Same reasoning as butterworthBandpass:
+     *  cascading two identical biquads does NOT give a higher-order Butterworth. */
     private fun butterworthHighpass(x: FloatArray, fs: Float, fc: Float): FloatArray {
         val cutLow = fc.coerceAtLeast(0.05f)
         val (bHp, aHp) = biquadHighpass(cutLow, fs)
-        var s = filterBiDirectional(x, bHp, aHp)
-        s = filterBiDirectional(s, bHp, aHp)
-        return s
+        return filterBiDirectional(x, bHp, aHp)
     }
 
     private fun biquadHighpass(fc: Float, fs: Float): Pair<FloatArray, FloatArray> {
