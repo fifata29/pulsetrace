@@ -170,9 +170,16 @@ fun RawModeScreen(
                 extender.setCaptureRequestOption(
                     CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_OFF
                 )
+                // COLOR_CORRECTION_MODE_FAST lets the ISP pick a sensible
+                // colour transform matrix. We tried TRANSFORM_MATRIX without
+                // supplying COLOR_CORRECTION_TRANSFORM and the output came
+                // back essentially black even when the flash was lit — the
+                // ISP was applying a zero/default matrix and nulling the data.
+                // FAST honours our COLOR_CORRECTION_GAINS but supplies the
+                // transform internally.
                 extender.setCaptureRequestOption(
                     CaptureRequest.COLOR_CORRECTION_MODE,
-                    CameraMetadata.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX
+                    CameraMetadata.COLOR_CORRECTION_MODE_FAST
                 )
                 extender.setCaptureRequestOption(
                     CaptureRequest.COLOR_CORRECTION_GAINS,
