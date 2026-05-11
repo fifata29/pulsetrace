@@ -33,8 +33,16 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     enum class Phase { Idle, Settling, Searching, Measuring, Done }
 
     /** Body site. Drives the channel used for the chart trace and morphology
-     *  computation. Peak detection always runs on red regardless. */
-    enum class Site { Fingertip, Forearm }
+     *  computation. Peak detection always runs on red regardless.
+     *  - Fingertip → red channel (transmission PPG; R saturates but gives stable timing)
+     *  - Forearm   → green channel (reflectance; clean dicrotic notch when notch confident)
+     *  - Palm      → green channel (reflectance; high perfusion, often no notch — anatomical) */
+    enum class Site { Fingertip, Forearm, Palm }
+
+    /** Sites that use the green channel for chart + morphology. R-for-peaks
+     *  stays the same; this just controls which signal feeds Sample.morphology
+     *  and Sample.filtered. */
+    private fun Site.usesGreen(): Boolean = this == Site.Forearm || this == Site.Palm
 
     /** Cardiac Snapshot is a chained two-stage workflow: fingertip → forearm,
      *  combining each site's strongest biomarkers into one composite report
@@ -224,8 +232,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     fun setSite(site: Site) {
         if (_state.value.isMeasuring) return
         _state.value = _state.value.copy(site = site)
-        processor.setUseGreen(site == Site.Forearm)
-        scoutChannelIsGreen = site == Site.Forearm
+        processor.setUseGreen(site.usesGreen())
+        scoutChannelIsGreen = site.usesGreen()
     }
 
     /** Begin a Cardiac Snapshot — stage 1 is fingertip, then user is prompted
@@ -245,11 +253,14 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /** After stage 1 completes the user is prompted to reposition; this kicks
-     *  off stage 2 (forearm). */
-    fun continueSnapshotStage2() {
+     *  off stage 2 with the user's chosen morphology site (forearm or palm).
+     *  Both use the green channel and the same hybrid pipeline; the label
+     *  just records which body site the user actually placed the phone on. */
+    fun continueSnapshotStage2(stage2Site: Site = Site.Forearm) {
         if (_state.value.snapshotState != SnapshotState.Stage1DonePending) return
+        val target = if (stage2Site.usesGreen()) stage2Site else Site.Forearm
         _state.value = _state.value.copy(
-            site = Site.Forearm,
+            site = target,
             snapshotState = SnapshotState.Stage2Active,
             phase = Phase.Idle
         )
@@ -307,8 +318,8 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         if (_state.value.phase != Phase.Idle && _state.value.phase != Phase.Done) return
         val currentSite = _state.value.site
         processor.reset()
-        processor.setUseGreen(currentSite == Site.Forearm)
-        scoutChannelIsGreen = currentSite == Site.Forearm
+        processor.setUseGreen(currentSite.usesGreen())
+        scoutChannelIsGreen = currentSite.usesGreen()
         scoutRingWritten = 0L
         startNs = System.nanoTime()
         measureStartNs = 0L
@@ -460,6 +471,21 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         report.sessionPath?.let { recorder.appendTagToSummary(it, tag) }
     }
 
+    /** Correct the body-site label on the just-recorded session — useful when the
+     *  user forgets to pick the site before tapping Start, or realises after the
+     *  fact that they had a different body part on the lens. The pipeline values
+     *  don't change retroactively (we can't re-run signal processing from JSON
+     *  alone), but the site / display_channel labels in summary.json are updated. */
+    fun setSiteForLastSession(site: Site) {
+        val report = _state.value.report ?: return
+        val updated = report.copy(site = site)
+        _state.value = _state.value.copy(report = updated)
+        val displayChan = if (site.usesGreen()) "G" else "R"
+        report.sessionPath?.let {
+            recorder.appendSiteToSummary(it, site.name.lowercase(), displayChan)
+        }
+    }
+
     private suspend fun runRoiSelection() {
         val frames: List<TileGridAnalyzer.TileSample> = synchronized(searchBuffer) {
             searchBuffer.toList()
@@ -469,7 +495,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             gridCols = GRID_COLS,
             gridRows = GRID_ROWS,
             topK = ROI_TOP_K,
-            useGreen = _state.value.site == Site.Forearm
+            useGreen = _state.value.site.usesGreen()
         )
         val info = RoiInfo(
             rowStart = result.bboxRowStart,
@@ -488,7 +514,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
         // channel are written to the CSV header so analysis tools can branch
         // correctly when replaying old vs new sessions.
         val site = _state.value.site
-        val displayChan = if (site == Site.Forearm) "G" else "R"
+        val displayChan = if (site.usesGreen()) "G" else "R"
         recorder.start(site = site.name.lowercase(), displayChannel = displayChan)
         phaseRef = Phase.Measuring
         _state.value = _state.value.copy(
@@ -553,7 +579,7 @@ class MeasurementViewModel(application: Application) : AndroidViewModel(applicat
             PulseMorphology.compute(morph, snap.sampleRateHz, peakIdx)
         } else null
         val site = _state.value.site
-        val displayChan = if (site == Site.Forearm) "G" else "R"
+        val displayChan = if (site.usesGreen()) "G" else "R"
         val session = recorder.stop(
             durationSec = measureElapsed,
             sampleRateHz = snap.sampleRateHz,

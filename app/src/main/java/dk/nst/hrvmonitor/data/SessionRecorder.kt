@@ -256,6 +256,37 @@ class SessionRecorder(private val appContext: Context) {
         append("\n}\n")
     }
 
+    /** Re-write summary.json with corrected site / display_channel labels.
+     *  Used when the user retroactively tags a session via the report sheet. */
+    fun appendSiteToSummary(sessionDir: String, site: String, displayChannel: String) {
+        ioScope.launch {
+            val summary = File(sessionDir, "summary.json")
+            repeat(10) {
+                if (summary.exists() && summary.length() > 0) return@repeat
+                delay(100)
+            }
+            if (!summary.exists()) {
+                Log.w(TAG, "appendSite: summary.json never appeared in $sessionDir")
+                return@launch
+            }
+            try {
+                var text = summary.readText()
+                text = text.replace(
+                    Regex("\"site\"\\s*:\\s*\"[^\"]*\""),
+                    "\"site\": \"$site\""
+                )
+                text = text.replace(
+                    Regex("\"display_channel\"\\s*:\\s*\"[^\"]*\""),
+                    "\"display_channel\": \"$displayChannel\""
+                )
+                summary.writeText(text)
+                Log.i(TAG, "Site $site/$displayChannel written to ${summary.name}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "site retag failed", t)
+            }
+        }
+    }
+
     /**
      * Re-write summary.json adding (or updating) the user-supplied state tag.
      * Loaded by hand-rolled JSON parsing to avoid depending on a JSON library here.

@@ -171,8 +171,16 @@ object PulseMorphology {
 
         // Compute metrics, gating each one against plausibility.
         val sysAmp = avg[fid.systolicPeak] - avg[fid.foot]
-        val crestTimeMs = if (fid.systolicPeak > fid.foot)
-            (avgTime[fid.systolicPeak] - avgTime[fid.foot]) * 1000f else null
+        // Crest plausibility gate: foot→systolic upstrokes shorter than ~80 ms
+        // are almost always fiducial errors (systolic peak picked on a noise
+        // spike before the real upstroke), and crests longer than ~400 ms are
+        // dominated by sensor-saturation tails (R on fingertip). Outside this
+        // band we return null instead of feeding a misleading number into
+        // the report — same posture as the notch-confidence gate.
+        val crestTimeMs: Float? = if (fid.systolicPeak > fid.foot) {
+            val v = (avgTime[fid.systolicPeak] - avgTime[fid.foot]) * 1000f
+            if (v in 80f..400f) v else null
+        } else null
 
         // RI / AIx / SI all require a CONFIDENT dicrotic notch. Without one, any
         // value we compute is fabricated from noise (we've seen RI = -13 % and

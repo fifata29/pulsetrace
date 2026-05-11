@@ -71,7 +71,8 @@ private enum class Metric { Bpm, Rmssd, Sdnn, Pnn50, Quality, CrestTime, Aix, Ri
 fun CompositeReportSheet(
     composite: MeasurementViewModel.CompositeReport,
     onDismiss: () -> Unit,
-    onTagSelect: ((StateTag) -> Unit)? = null
+    onTagSelect: ((StateTag) -> Unit)? = null,
+    onSiteSelect: ((MeasurementViewModel.Site) -> Unit)? = null
 ) {
     // Merge: forearm carries the signal trace and morphology, fingertip carries
     // the timing-based metrics. sessionPath stays on the forearm (= most recent
@@ -85,11 +86,17 @@ fun CompositeReportSheet(
         morphology = composite.forearm.morphology,
         site = MeasurementViewModel.Site.Forearm
     )
+    val headerLabel = "Cardiac Snapshot — fingertip + " +
+        when (composite.forearm.site) {
+            MeasurementViewModel.Site.Palm -> "palm"
+            else -> "forearm"
+        }
     ReportSheet(
         report = merged,
         onDismiss = onDismiss,
         onTagSelect = onTagSelect,
-        headerOverride = "Cardiac Snapshot — fingertip + forearm"
+        onSiteSelect = onSiteSelect,
+        headerOverride = headerLabel
     )
 }
 
@@ -99,6 +106,7 @@ fun ReportSheet(
     report: MeasurementViewModel.Report,
     onDismiss: () -> Unit,
     onTagSelect: ((StateTag) -> Unit)? = null,
+    onSiteSelect: ((MeasurementViewModel.Site) -> Unit)? = null,
     headerOverride: String? = null
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -117,6 +125,7 @@ fun ReportSheet(
             score = score,
             onShowExplainer = { explainer = it },
             onTagSelect = onTagSelect,
+            onSiteSelect = onSiteSelect,
             onDone = onDismiss,
             headerOverride = headerOverride
         )
@@ -132,6 +141,7 @@ private fun ReportContent(
     score: QualityScorer.Score,
     onShowExplainer: (Metric) -> Unit,
     onTagSelect: ((StateTag) -> Unit)?,
+    onSiteSelect: ((MeasurementViewModel.Site) -> Unit)?,
     onDone: () -> Unit,
     headerOverride: String? = null
 ) {
@@ -212,6 +222,21 @@ private fun ReportContent(
             highlightColor = Accent,
             onInfo = { onShowExplainer(Metric.Pnn50) }
         )
+
+        // Site re-tag chips — let the user correct the body site label if they
+        // forgot to pick the right one before tapping Start (or were using
+        // palm but had Forearm selected, etc.). Only writes the label into
+        // summary.json; doesn't re-run signal processing on the saved CSV.
+        if (onSiteSelect != null) {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "Which body site was this?",
+                color = OnSurfaceMuted,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Spacer(Modifier.height(6.dp))
+            SiteRetagRow(selected = report.site, onSelect = onSiteSelect)
+        }
 
         // State tag chips — only enabled when the report belongs to the latest measurement.
         if (onTagSelect != null) {
@@ -354,6 +379,40 @@ private fun ReportContent(
             colors = ButtonDefaults.buttonColors(containerColor = Pulse, contentColor = Color.White)
         ) { Text("Done", style = MaterialTheme.typography.titleMedium) }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun SiteRetagRow(
+    selected: MeasurementViewModel.Site,
+    onSelect: (MeasurementViewModel.Site) -> Unit
+) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        MeasurementViewModel.Site.values().forEach { site ->
+            val isSel = site == selected
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(if (isSel) Accent.copy(alpha = 0.22f) else SurfaceElev)
+                    .clickable { onSelect(site) }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    when (site) {
+                        MeasurementViewModel.Site.Fingertip -> "Fingertip"
+                        MeasurementViewModel.Site.Forearm -> "Forearm"
+                        MeasurementViewModel.Site.Palm -> "Palm"
+                    },
+                    color = if (isSel) Accent else Color.White,
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
+        }
     }
 }
 

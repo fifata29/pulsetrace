@@ -149,14 +149,16 @@ fun MeasurementScreen(
         ReportSheet(
             report = report,
             onDismiss = viewModel::dismissReport,
-            onTagSelect = viewModel::setTagForLastSession
+            onTagSelect = viewModel::setTagForLastSession,
+            onSiteSelect = viewModel::setSiteForLastSession
         )
     }
     state.composite?.let { composite ->
         CompositeReportSheet(
             composite = composite,
             onDismiss = viewModel::dismissReport,
-            onTagSelect = viewModel::setTagForLastSession
+            onTagSelect = viewModel::setTagForLastSession,
+            onSiteSelect = viewModel::setSiteForLastSession
         )
     }
 }
@@ -196,7 +198,7 @@ private fun ContentLayout(
             tileAc = state.tileAc,
             bestTileRow = state.bestTileRow,
             bestTileCol = state.bestTileCol,
-            scoutChannelIsGreen = state.site == MeasurementViewModel.Site.Forearm
+            scoutChannelIsGreen = state.site != MeasurementViewModel.Site.Fingertip
         )
         Spacer(Modifier.height(8.dp))
 
@@ -204,7 +206,7 @@ private fun ContentLayout(
             state.snapshotState == MeasurementViewModel.SnapshotState.Stage1DonePending -> {
                 SnapshotStage1DonePrompt(
                     stage1 = state.snapshotStage1Report,
-                    onContinue = viewModel::continueSnapshotStage2,
+                    onContinue = { stage2Site -> viewModel.continueSnapshotStage2(stage2Site) },
                     onCancel = viewModel::cancelSnapshot
                 )
                 Spacer(Modifier.height(8.dp))
@@ -240,13 +242,13 @@ private fun ContentLayout(
         QualityBar(coverage = state.coverage, sampleRateHz = state.sampleRateHz)
         Spacer(Modifier.height(8.dp))
 
-        val isForearm = state.site == MeasurementViewModel.Site.Forearm
+        val useGreenChart = state.site != MeasurementViewModel.Site.Fingertip
         SignalChart(
             samples = state.signal,
             peaks = state.peaks,
             modifier = Modifier.weight(1f, fill = true),
-            lineColor = if (isForearm) ForearmPulse else Pulse,
-            lineColorSoft = if (isForearm) ForearmPulseSoft else PulseSoft
+            lineColor = if (useGreenChart) ForearmPulse else Pulse,
+            lineColorSoft = if (useGreenChart) ForearmPulseSoft else PulseSoft
         )
         Spacer(Modifier.height(8.dp))
 
@@ -277,7 +279,7 @@ private fun SiteSelector(
             for (s in MeasurementViewModel.Site.values()) {
                 val pick = (s == selected)
                 val chipColor = if (pick) {
-                    if (s == MeasurementViewModel.Site.Forearm) ForearmPulse else Pulse
+                    if (s == MeasurementViewModel.Site.Fingertip) Pulse else ForearmPulse
                 } else SurfaceElev
                 Box(
                     Modifier
@@ -285,13 +287,14 @@ private fun SiteSelector(
                         .clip(RoundedCornerShape(20.dp))
                         .background(chipColor)
                         .clickable { onPick(s) }
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
                         when (s) {
-                            MeasurementViewModel.Site.Fingertip -> "Fingertip · red channel"
-                            MeasurementViewModel.Site.Forearm -> "Forearm · green channel"
+                            MeasurementViewModel.Site.Fingertip -> "Fingertip"
+                            MeasurementViewModel.Site.Forearm -> "Forearm"
+                            MeasurementViewModel.Site.Palm -> "Palm"
                         },
                         color = Color.White,
                         style = MaterialTheme.typography.labelMedium
@@ -331,9 +334,10 @@ private fun SnapshotStartButton(onStart: () -> Unit) {
 @Composable
 private fun SnapshotStage1DonePrompt(
     stage1: MeasurementViewModel.Report?,
-    onContinue: () -> Unit,
+    onContinue: (MeasurementViewModel.Site) -> Unit,
     onCancel: () -> Unit
 ) {
+    var stage2Choice by remember { mutableStateOf(MeasurementViewModel.Site.Forearm) }
     Column(
         Modifier
             .fillMaxWidth()
@@ -358,10 +362,31 @@ private fun SnapshotStage1DonePrompt(
             Spacer(Modifier.height(8.dp))
         }
         Text(
-            "Now place your forearm volar side on the lens and flash. Use the heat-map during settle to find the optimal lateral spot, then hold steady.",
+            "Stage 2 — pick the morphology site you'll place on the lens (whichever is more convenient right now). Use the heat-map during settle to find the optimal lateral spot, then hold steady.",
             color = OnSurfaceMuted,
             style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp)
         )
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (s in listOf(MeasurementViewModel.Site.Forearm, MeasurementViewModel.Site.Palm)) {
+                val pick = (s == stage2Choice)
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (pick) ForearmPulse else SurfaceElev)
+                        .clickable { stage2Choice = s }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        if (s == MeasurementViewModel.Site.Forearm) "Forearm" else "Palm",
+                        color = Color.White,
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(
@@ -369,11 +394,15 @@ private fun SnapshotStage1DonePrompt(
                     .weight(1f)
                     .clip(RoundedCornerShape(20.dp))
                     .background(ForearmPulse)
-                    .clickable { onContinue() }
+                    .clickable { onContinue(stage2Choice) }
                     .padding(horizontal = 14.dp, vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text("Continue to forearm", color = Color.White, style = MaterialTheme.typography.labelMedium)
+                Text(
+                    "Continue · " + if (stage2Choice == MeasurementViewModel.Site.Palm) "palm" else "forearm",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium
+                )
             }
             Box(
                 Modifier

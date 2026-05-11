@@ -133,11 +133,15 @@ class SignalProcessor(
         val displayedRaw = if (useGreen) uniformG else uniformR
         val displayedMorphology = if (useGreen) detrendedG else detrendedR
 
-        // Spectral BPM search uses a tighter "plausible adult resting HR" window
-        // independent of the bandpass cutoffs. With the wider 0.5 Hz bandpass we
-        // would otherwise lock onto sub-cardiac vasomotion peaks on forearm R
-        // (DC penetrates deeper, more low-freq energy survives the filter).
-        val spectralBpm = dominantBpm(filteredR, fs, SPECTRAL_LOW_HZ, SPECTRAL_HIGH_HZ)
+        // Spectral BPM: scan the channel that has the actual signal. On
+        // forearm / palm the ROI was picked on G coherence so R from those
+        // tiles is weak — the spectral peak finder used to default to the
+        // 0.7 Hz lower bound (42 BPM "floor hits") and crater the BPM
+        // agreement quality component even when the peak detector got the
+        // right HR. Match the spectral check to whichever channel we're
+        // displaying / running morphology on.
+        val spectralSource = if (useGreen) filteredG else filteredR
+        val spectralBpm = dominantBpm(spectralSource, fs, SPECTRAL_LOW_HZ, SPECTRAL_HIGH_HZ)
 
         val samples = ArrayList<Sample>(uniformN)
         for (i in 0 until uniformN) {
