@@ -155,6 +155,16 @@ fun RawModeScreen(
                 extender.setCaptureRequestOption(
                     CaptureRequest.SENSOR_FRAME_DURATION, MANUAL_FRAME_DURATION_NS
                 )
+                // CRITICAL: when CONTROL_AE_MODE is OFF, the AE pipeline no
+                // longer orchestrates the flash. cameraControl.enableTorch(true)
+                // is silently ignored. We must explicitly request the torch via
+                // FLASH_MODE = TORCH in the capture request itself. Without
+                // this, the previous "Manual mode" recordings were dark
+                // (R DC ~5/255) because the LED was off — diagnosed from
+                // raw-tiles.csv DC analysis on the first user attempts.
+                extender.setCaptureRequestOption(
+                    CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_TORCH
+                )
                 // Disable AWB; identity colour gains so R, G, B reach the
                 // sensor with the same scaling.
                 extender.setCaptureRequestOption(
