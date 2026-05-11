@@ -24,7 +24,14 @@ param(
     [string]$Apk = "",
     [switch]$WaitCi,
     [string]$Device = "",
-    [int]$WaitCiTimeoutSec = 600
+    [int]$WaitCiTimeoutSec = 600,
+    # Restore session data after install. OFF by default: adb push creates the
+    # restored files owned by the shell user, not by the app's UID, which on
+    # modern Android (API 30+) blocks the app from creating new files inside
+    # its own external data directory and the app crashes on the next
+    # recording with EACCES. Backups are still always written to .deploy_backup
+    # so the data isn't lost; we just don't push it back to the phone.
+    [switch]$Restore
 )
 
 # ----------------------------- config -----------------------------
@@ -186,13 +193,25 @@ if ("$installOut" -notmatch "Success") {
     throw "adb install failed:`n$installOut"
 }
 
-# The external files dir is created when the app first launches. Start the
-# main activity to ensure the target directory exists before we push files back.
-Write-Host "  cold-starting the app to create the files dir ..."
+# Cold-start so the app's external files dir exists and is app-owned.
+Write-Host "  cold-starting the app to initialise its data dir ..."
 Adb $dev shell "monkey -p $PKG -c android.intent.category.LAUNCHER 1" | Out-Null
 Start-Sleep -Seconds 3
 
-Write-Host "Step 4/4 - restoring session data ..."
-Restore-Sessions -dev $dev -backup $backup
+if ($Restore) {
+    Write-Host "Step 4/4 - restoring session data ..."
+    Write-Warning "  -Restore was set. Sessions pushed via adb are owned by the shell"
+    Write-Warning "  user, NOT the app's UID. On API 30+ the app will crash with EACCES"
+    Write-Warning "  on the next recording. Use this flag only when you know it works."
+    Restore-Sessions -dev $dev -backup $backup
+} else {
+    Write-Host "Step 4/4 - skipping in-app restore (data preserved on PC)"
+    if ($backup.Folders.Count -gt 0) {
+        Write-Host "  PC backup: $($backup.Path)"
+        Write-Host "  In-app history starts fresh on the phone after install — this is"
+        Write-Host "  expected. Past sessions are intact in the backup folder above and"
+        Write-Host "  in F:\Vibe Coding\HRV App\sessions\ for Python analysis."
+    }
+}
 Write-Host ""
-Write-Host "Done. Open PulseTrace to verify history is intact."
+Write-Host "Done. Open PulseTrace."
