@@ -21,6 +21,8 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -250,10 +252,12 @@ fun RawModeScreen(
             }
         }
     ) { padding ->
+        val scroll = rememberScrollState()
         Column(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(scroll)
                 .padding(horizontal = 16.dp, vertical = 4.dp)
         ) {
             RawHeader(onBack)
@@ -272,6 +276,12 @@ fun RawModeScreen(
             }
             Spacer(Modifier.height(10.dp))
 
+            ChannelRow(state)
+            Spacer(Modifier.height(8.dp))
+
+            LiveDiagnosticPanel(state)
+            Spacer(Modifier.height(8.dp))
+
             if (!state.isRecording) {
                 SiteRow(state.site, viewModel::setSite)
                 Spacer(Modifier.height(8.dp))
@@ -282,12 +292,6 @@ fun RawModeScreen(
                 SweepToggleRow(state.sweepMode, viewModel::setSweepMode)
                 Spacer(Modifier.height(10.dp))
             }
-
-            ChannelRow(state)
-            Spacer(Modifier.height(8.dp))
-
-            LiveDiagnosticPanel(state)
-            Spacer(Modifier.height(8.dp))
 
             PulseStrengthBar(state)
             Spacer(Modifier.height(8.dp))
@@ -301,8 +305,7 @@ fun RawModeScreen(
             }
 
             ProgressBlock(state)
-
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(12.dp))
 
             ExplainerOrPath(state)
             Spacer(Modifier.height(8.dp))
